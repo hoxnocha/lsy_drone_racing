@@ -20,6 +20,7 @@ import numpy as np
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
 
 from lsy_drone_racing.utils import load_config, load_controller
+from lsy_drone_racing.utils import draw_line  
 
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
@@ -91,15 +92,45 @@ def simulate(
             action = np.asarray(jp.asarray(action), copy=True)
 
             obs, reward, terminated, truncated, info = env.step(action)
+            print(
+                f"[step {i}] "
+                f"time={curr_time:.3f}s "
+                f"target_gate={int(np.asarray(obs['target_gate']).item())} "
+                f"terminated={terminated} truncated={truncated} "
+                f"reward={reward:.3f} "
+                f"pos={obs['pos']} "
+                f"quat={obs['quat']} "
+                f"action={action}"
+            )
             # Update the controller internal state and models.
             controller_finished = controller.step_callback(
                 action, obs, reward, terminated, truncated, info
             )
             # Add up reward, collisions
             if terminated or truncated or controller_finished:
+                print(
+                    f"--> breaking loop at step {i}: "
+                    f"terminated={terminated}, truncated={truncated}, "
+                    f"controller_finished={controller_finished}"
+                )
+                # also dump info dict for clues
+                print(f"final info keys: {list(info.keys())}")
+                try:
+                    print(f"info: {info}")
+                except Exception:
+                    pass
                 break
+            # if config.sim.render:  # Render the sim if selected.
+            #     if ((i * fps) % config.env.freq) < fps:
+            #         env.render()
             if config.sim.render:  # Render the sim if selected.
                 if ((i * fps) % config.env.freq) < fps:
+                    if hasattr(controller, "get_debug_lines"):
+                        try:
+                            for pts, rgba, smin, smax in controller.get_debug_lines():
+                                draw_line(env, pts, rgba=rgba, min_size=smin, max_size=smax)
+                        except Exception as e:
+                            print(f"[viz] draw_line warning: {e}")
                     env.render()
             i += 1
 
