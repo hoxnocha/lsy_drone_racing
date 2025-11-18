@@ -31,46 +31,58 @@ class DynamicTrajectoryController(Controller):
         self._tick = 0
         self._finished = False
         
-        
-        
-      
-        self.gates_pos = obs['gates_pos']
+        # 存储无人机初始位置，用于所有规划
         self.init_pos = obs['pos']
-        self.gates_norm, self.gate_y_axes, self.gate_z_axes = \
-            self._extract_gate_coordinate_frames(obs['gates_quat'])
-
-        
-        waypoints = self.calc_waypoints(self.init_pos, self.gates_pos, self.gates_norm)
-        
-        
-        waypoints = self._add_detour_waypoints(
-            waypoints,
-            self.gates_pos,
-            self.gates_norm,
-            self.gate_y_axes,
-            self.gate_z_axes,
-            num_intermediate_points=5,
-            angle_threshold=120.0,
-            detour_distance=0.65
-        )
-
-       
-        t, waypoints_avoided = self.avoid_collision(waypoints, obs['obstacles_pos'], 0.3)
-
-        
-        if len(t) < 2: 
-            print("警告: avoid_collision 返回点少于2个。使用原始路径点。")
-            self.trajectory = self.trajectory_generate(self.t_total, waypoints)
-        else:
-            self.trajectory = CubicSpline(t, waypoints_avoided)
-            self.t_total = self.trajectory.x[-1] 
-            
+      
+        # 执行初始轨迹规划
+        self._plan_trajectory(obs)
         
         if load_params:
             drone_params = load_params(config.sim.physics, config.sim.drone_model)
             self.drone_mass = drone_params["mass"]
             
     
+    def _plan_trajectory(self, obs: dict[str, NDArray[np.floating]]):
+        """
+        根据当前的 obs 生成或重新生成一条完整的轨迹。
+        """
+        print(f"T={self._tick / self._freq:.2f}: (Re)planning trajectory...")
+
+        # 1. 提取当前已知的物体位置和姿态
+        current_gates_pos = obs['gates_pos']
+        current_obstacles_pos = obs['obstacles_pos']
+        current_gates_quat = obs['gates_quat']
+        
+        gates_norm, gate_y_axes, gate_z_axes = \
+            self._extract_gate_coordinate_frames(current_gates_quat)
+
+        # 2. 计算基本路径点 (始终从初始位置开始)
+        waypoints = self.calc_waypoints(self.init_pos, current_gates_pos, gates_norm)
+        
+        # 3. 添加绕行路径点
+        waypoints = self._add_detour_waypoints(
+            waypoints,
+            current_gates_pos,
+            gates_norm,
+            gate_y_axes,
+            gate_z_axes,
+            num_intermediate_points=5,
+            angle_threshold=120.0,
+            detour_distance=0.65
+        )
+
+        # 4. 碰撞规避
+        t, waypoints_avoided = self.avoid_collision(waypoints, current_obstacles_pos, 0.3)
+
+        # 5. 用新数据生成新的样条
+        if len(t) < 2:
+            print("警告: _plan_trajectory 中 avoid_collision 返回点少于2个。")
+            self.trajectory = self.trajectory_generate(self.t_total, waypoints)
+        else:
+            self.trajectory = CubicSpline(t, waypoints_avoided)
+            self.t_total = self.trajectory.x[-1]
+
+
     def calc_waypoints(
             self, drone_init_pos: NDArray[np.floating], gates_pos: NDArray[np.floating], gates_norm: NDArray[np.floating], distance: float = 0.5 , num_int_pnts: int = 5,
     ) -> NDArray[np.floating]:
@@ -89,7 +101,7 @@ class DynamicTrajectoryController(Controller):
         diffs = np.diff(waypoints, axis=0)
         segment_length = np.linalg.norm(diffs, axis=1)
         arc_cum_length = np.concatenate([[0], np.cumsum(segment_length)])
-        t = arc_cum_length / arc_cum_length[-1] * t_total
+        t = arc_cum_length / (arc_cum_length[-1] + 1e-6) * t_total # 增加 1e-6 避免除零
         return CubicSpline(t, waypoints)
     
     def avoid_collision(
@@ -153,7 +165,10 @@ class DynamicTrajectoryController(Controller):
         return t_axis, wp
     
     def pos_change_detect(self, obs: dict[str, NDArray[np.bool_]]) -> bool:
-        
+        """
+        检测 'visited' 标志是否从 False 变为 True。
+        (根据你的确认，这表示物体进入了传感器视野)
+        """
         if not hasattr(self, 'last_gate_flags'):
             self.last_gate_flags = np.array(obs['gates_visited'], dtype=bool)
             self.last_obst_flags = np.array(obs['obstacles_visited'], dtype=bool)
@@ -162,6 +177,7 @@ class DynamicTrajectoryController(Controller):
         curr_gate_flags = np.array(obs['gates_visited'], dtype=bool)
         curr_obst_flags = np.array(obs['obstacles_visited'], dtype=bool)
 
+        # 检查是否有任何标志 *刚刚* 变为 True
         gate_triggered = np.any((~self.last_gate_flags) & curr_gate_flags)
         obst_triggered = np.any((~self.last_obst_flags) & curr_obst_flags)
 
@@ -265,44 +281,14 @@ class DynamicTrajectoryController(Controller):
             info: Optional additional information as a dictionary.
 
         Returns:
-            A 13-element drone state command [x, y, z, vx, vy, vz, ax, ay, az, yaw, rrate, prate, yrate].
+            drone state command [x, y, z, vx, vy, vz, ax, ay, az, yaw, rrate, prate, yrate].
         """
         
-     
+        # 检查是否需要重规划
         if self.pos_change_detect(obs):
             print(f"T={self._tick / self._freq:.2f}: 探测到新物体！重新规划轨迹。")
-            
-          
-            self.gates_pos = obs['gates_pos']
-            self.gates_norm, self.gate_y_axes, self.gate_z_axes = \
-                self._extract_gate_coordinate_frames(obs['gates_quat'])
-            
-            
-            waypoints = self.calc_waypoints(self.init_pos, self.gates_pos, self.gates_norm)
-            
-            # 3. 添加绕行路径点 (来自 level2.py)
-            waypoints = self._add_detour_waypoints(
-                waypoints,
-                self.gates_pos,
-                self.gates_norm,
-                self.gate_y_axes,
-                self.gate_z_axes,
-                num_intermediate_points=5,
-                angle_threshold=120.0,
-                detour_distance=0.65
-            )
-            
-            # 4. 重新运行碰撞规避 (来自 level2_1.py)
-            t, waypoints_avoided = self.avoid_collision(waypoints, obs['obstacles_pos'], 0.3)
-            
-            # 5. 用新数据生成新的样条 (来自 level2_1.py)
-            if len(t) < 2:
-                print("警告: 重规划时 avoid_collision 返回点少于2个。")
-                self.trajectory = self.trajectory_generate(self.t_total, waypoints)
-            else:
-                self.trajectory = CubicSpline(t, waypoints_avoided)
-            
-            self.t_total = self.trajectory.x[-1]
+            # 调用重构后的统一规划函数
+            self._plan_trajectory(obs)
 
         # ---== End of Re-planning Logic ==---
 
@@ -341,6 +327,7 @@ class DynamicTrajectoryController(Controller):
         """
         self._tick = 0
         self._finished = False
+        
         
         if hasattr(self, 'last_gate_flags'):
             delattr(self, 'last_gate_flags')
