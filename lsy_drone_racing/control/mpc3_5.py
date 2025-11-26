@@ -26,6 +26,8 @@ def create_acados_model(parameters: dict) -> AcadosModel:
         rpy_rates_coef=parameters["rpy_rates_coef"],
         cmd_rpy_coef=parameters["cmd_rpy_coef"],
     )
+    
+    print("acc_coef in acados model:", parameters["acc_coef"])
 
     model = AcadosModel()
     model.name = "att_mpc_lvl2_softobs_band"

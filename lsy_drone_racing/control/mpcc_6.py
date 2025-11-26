@@ -9,13 +9,16 @@ from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
 
 from drone_models.core import load_params
-from drone_models.so_rpy import symbolic_dynamics_euler
 from lsy_drone_racing.control import Controller
-
+from enum import IntEnum
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+
+class ObstacleType(IntEnum):
+    CYLINDER_2D = 0  # 无限高圆柱：只计算 XY 平面距离 (用于大障碍物、左右门柱)
+    CAPSULE_3D  = 2  # 有限长线段/胶囊：计算点到线段距离 (用于上下门框)
 
 class FrameUtils:
 
@@ -187,8 +190,6 @@ class PathTools:
 
 
 
-
-
 class MPCC(Controller):
     """Model Predictive Contouring Control for drone racing."""
 
@@ -199,19 +200,11 @@ class MPCC(Controller):
         self._step_count = 0
         self._cfg = config
 
-        self.drone_params = load_params("so_rpy", config.sim.drone_model)
-        mass_val = float(self.drone_params["mass"])
-        gravity_mag = -float(self.drone_params["gravity_vec"][-1])
-        
-        # [FIXED] 使用 acc_coef 反推悬停所需的归一化推力
-        # acc = a * thrust + b  =>  gravity = a * hover_thrust + b
-        # hover_thrust = (gravity - b) / a
-        acc = self.drone_params["acc_coef"]
-        print("acc_coef:", acc)
-        
-        
-        self.hover_thrust = float(self.drone_params["mass"]) * float(self.drone_params["gravity_vec"][2])
-        
+        self._dyn_params = load_params("so_rpy", config.sim.drone_model)
+        mass_val = float(self._dyn_params["mass"])
+        gravity_mag = -float(self._dyn_params["gravity_vec"][-1])
+
+        self.hover_thrust = mass_val * gravity_mag
 
         self._initial_pos = obs["pos"]
         self._cached_gate_centers = obs["gates_pos"]
@@ -232,7 +225,7 @@ class MPCC(Controller):
         )
 
         self.acados_ocp_solver, self.ocp = self._build_ocp_and_solver(
-            self.T_HORIZON, self.N, self.arc_trajectory, self.drone_params
+            self.T_HORIZON, self.N, self.arc_trajectory
         )
 
         self.pos_bound = [
@@ -252,40 +245,18 @@ class MPCC(Controller):
 
     def _export_dynamics_model(self) -> AcadosModel:
         """
-        Continuous-time quadrotor dynamics.
-        Robustly handles acc_coef: falls back to 1/mass if acc_coef is invalid/zero.
+        Continuous-time quadrotor dynamics in the same structure as the original version.
         """
+
         model_name = "lsy_example_mpc"
 
-        # 1. 提取物理参数
-        mass_val = float(self.drone_params["mass"])
-        GRAVITY = -float(self.drone_params["gravity_vec"][-1])
+        mass_val = float(self._dyn_params["mass"])
+        GRAVITY = -float(self._dyn_params["gravity_vec"][-1])
 
-        # 2. 提取/计算 加速度系数 (Force -> Acceleration)
-        # 我们期望输入 f_collective 是牛顿 (N)
-        # 理论上: acc = f / mass => acc_coef = [1/mass, 0]
-        
-        acc_coef_raw = self.drone_params.get("acc_coef", 0.0)
-        acc_coef_arr = np.atleast_1d(acc_coef_raw)
+        params_pitch_rate = [-6.003842038081178, 6.213752925707588]
+        params_roll_rate = [-3.960889336015948, 4.078293254657104]
+        params_yaw_rate = [-0.005347588299390372, 0.0]
 
-        
-        params_acc = [1.0 / mass_val, 0.0]
-
-        # 3. 提取姿态动力学系数
-        params_roll_rate = [
-            float(self.drone_params["rpy_rates_coef"][0]),
-            float(self.drone_params["cmd_rpy_coef"][0])
-        ]
-        params_pitch_rate = [
-            float(self.drone_params["rpy_rates_coef"][1]),
-            float(self.drone_params["cmd_rpy_coef"][1])
-        ]
-        params_yaw_rate = [
-            float(self.drone_params["rpy_rates_coef"][2]),
-            float(self.drone_params["cmd_rpy_coef"][2])
-        ]
-
-        # 4. 定义 CasADi 符号变量
         self.px = MX.sym("px")
         self.py = MX.sym("py")
         self.pz = MX.sym("pz")
@@ -308,27 +279,42 @@ class MPCC(Controller):
         self.v_theta_cmd = MX.sym("v_theta_cmd")
 
         states = vertcat(
-            self.px, self.py, self.pz, self.vx, self.vy, self.vz,
-            self.roll, self.pitch, self.yaw, self.f_collective,
-            self.f_collective_cmd, self.r_cmd, self.p_cmd, self.y_cmd,
+            self.px,
+            self.py,
+            self.pz,
+            self.vx,
+            self.vy,
+            self.vz,
+            self.roll,
+            self.pitch,
+            self.yaw,
+            self.f_collective,
+            self.f_collective_cmd,
+            self.r_cmd,
+            self.p_cmd,
+            self.y_cmd,
             self.theta,
         )
         inputs = vertcat(
-            self.df_cmd, self.dr_cmd, self.dp_cmd, self.dy_cmd, self.v_theta_cmd,
+            self.df_cmd,
+            self.dr_cmd,
+            self.dp_cmd,
+            self.dy_cmd,
+            self.v_theta_cmd,
         )
 
-        # 5. 动力学方程
-        # 使用 params_acc (即 1/mass) 将力转换为加速度
-        thrust_input = self.f_collective
-        acc_magnitude = params_acc[0] * thrust_input + params_acc[1]
+        thrust = self.f_collective
+        inv_mass = 1.0 / mass_val
 
-        ax = acc_magnitude * (
-            cos(self.roll) * sin(self.pitch) * cos(self.yaw) + sin(self.roll) * sin(self.yaw)
+        ax = inv_mass * thrust * (
+            cos(self.roll) * sin(self.pitch) * cos(self.yaw)
+            + sin(self.roll) * sin(self.yaw)
         )
-        ay = acc_magnitude * (
-            cos(self.roll) * sin(self.pitch) * sin(self.yaw) - sin(self.roll) * cos(self.yaw)
+        ay = inv_mass * thrust * (
+            cos(self.roll) * sin(self.pitch) * sin(self.yaw)
+            - sin(self.roll) * cos(self.yaw)
         )
-        az = acc_magnitude * cos(self.roll) * cos(self.pitch) - GRAVITY
+        az = inv_mass * thrust * cos(self.roll) * cos(self.pitch) - GRAVITY
 
         f_dyn = vertcat(
             self.vx,
@@ -360,7 +346,7 @@ class MPCC(Controller):
         model.u = inputs
         model.p = params
         return model
-    
+
     def _piecewise_linear_interp(self, theta, theta_vec, flattened_points, dim: int = 3):
         """
         CasADi-friendly linear interpolation along 1D parameter theta.
@@ -393,7 +379,7 @@ class MPCC(Controller):
         if hasattr(self, "_cached_gate_centers"):
             for gate_center in self._cached_gate_centers:
                 d_gate = np.linalg.norm(pd_vals - gate_center, axis=-1)
-                qc_gate = np.exp(-8.0 * d_gate**2)
+                qc_gate = np.exp(-5.0 * d_gate**2)
                 qc_dyn = np.maximum(qc_dyn, qc_gate)
 
         if hasattr(self, "_cached_obstacles"):
@@ -409,7 +395,7 @@ class MPCC(Controller):
         MPCC stage cost: path tracking (contouring + lag), attitude regularization,
         control smoothness and progress / speed shaping.
         """
-        position_vec = vertcat(self.vx, self.vy, self.vz)
+        position_vec = vertcat(self.px, self.py, self.pz)
         att_vec = vertcat(self.roll, self.pitch, self.yaw)
         ctrl_vec = vertcat(self.df_cmd, self.dr_cmd, self.dp_cmd, self.dy_cmd)
 
@@ -462,8 +448,8 @@ class MPCC(Controller):
         ocp.model.cost_expr_ext_cost = self._stage_cost_expression()
 
         # state bounds
-        thrust_min = float(self.drone_params["thrust_min"]) * 4.0
-        thrust_max = float(self.drone_params["thrust_max"]) * 4.0
+        thrust_min = float(self._dyn_params["thrust_min"]) * 4.0
+        thrust_max = float(self._dyn_params["thrust_max"]) * 4.0
 
         # [px,py,pz,vx,vy,vz,roll,pitch,yaw,f,f_cmd,r_cmd,p_cmd,y_cmd,theta]
         ocp.constraints.lbx = np.array([thrust_min, thrust_min, -1.57, -1.57, -1.57])
@@ -497,46 +483,61 @@ class MPCC(Controller):
         solver = AcadosOcpSolver(ocp, json_file="mpcc_prescripted.json", verbose=verbose)
         return solver, ocp
 
-    # ------------- trajectory planning & obstacle handling -------------
     
-    def _generate_gate_frame_obstacles(
+    def _get_virtual_gate_obstacles(
         self,
         gate_positions: NDArray[np.floating],
         gate_quats: NDArray[np.floating],
-        gate_width: float = 0.7,   # 基于 gate.xml
-        gate_height: float = 0.7   # 基于 gate.xml
-    ) -> NDArray[np.floating]:
+        gate_width: float = 0.7,
+        gate_height: float = 0.7
+    ) -> tuple[NDArray[np.floating], NDArray[np.int_], NDArray[np.floating], NDArray[np.floating]]:
         """
-        生成代表门框（上下左右）的虚拟障碍物点。
+        计算代表门框几何结构的虚拟障碍物。
+        返回: (positions, types, vecs, lens)
         """
-        # 提取门的 Y 轴 (左右) 和 Z 轴 (上下)
-        
-        gate_y_axes = FrameUtils.quat_to_axis(gate_quats, axis_index=1)
-        gate_z_axes = FrameUtils.quat_to_axis(gate_quats, axis_index=2)
+        gate_y_axes = FrameUtils.quat_to_axis(gate_quats, axis_index=1) # 横向
+        gate_z_axes = FrameUtils.quat_to_axis(gate_quats, axis_index=2) # 垂直
 
-        virtual_obstacles = []
-        half_width = gate_width / 2.0
-        half_height = gate_height / 2.0
+        obs_positions = []
+        obs_types = []
+        obs_vecs = []
+        obs_lens = []
+
+        half_w = gate_width / 2.0
+        half_h = gate_height / 2.0
 
         for i in range(len(gate_positions)):
-            center = gate_positions[i]
-            y_axis = gate_y_axes[i]
-            z_axis = gate_z_axes[i]
+            c = gate_positions[i]
+            y = gate_y_axes[i]
+            z = gate_z_axes[i]
 
-            # --- 左右门柱 ---
-            post_left = center + y_axis * half_width
-            post_right = center - y_axis * half_width
+            # --- A. 左右门柱 (Side Posts) ---
+            # 类型: CYLINDER_2D (0) -> 无限垂直圆柱，防止从侧面或上方撞柱
+            for sign in [1.0, -1.0]:
+                post_pos = c + sign * half_w * y
+                
+                obs_positions.append(post_pos)
+                obs_types.append(ObstacleType.CYLINDER_2D)
+                obs_vecs.append(np.zeros(3)) # 圆柱不需要方向
+                obs_lens.append(0.0)         # 圆柱不需要长度
 
-            # --- 上下门框 ---
-            post_top = center + z_axis * half_height
-            post_bottom = center - z_axis * half_height
+            # --- B. 上下横梁 (Top & Bottom Bars) ---
+            # 类型: CAPSULE_3D (2) -> 有限长线段，只保护门框边缘，中间留空
+            for sign in [1.0, -1.0]:
+                bar_pos = c + sign * half_h * z
+                
+                obs_positions.append(bar_pos)
+                obs_types.append(ObstacleType.CAPSULE_3D)
+                obs_vecs.append(y)      # 方向: 沿着门的横向延伸
+                obs_lens.append(half_w) # 长度: 从中心向两侧延伸半宽
 
-            virtual_obstacles.append(post_left)
-            virtual_obstacles.append(post_right)
-            virtual_obstacles.append(post_top)
-            virtual_obstacles.append(post_bottom)
-
-        return np.array(virtual_obstacles)
+        return (
+            np.array(obs_positions),
+            np.array(obs_types, dtype=int),
+            np.array(obs_vecs),
+            np.array(obs_lens)
+        )
+    # ------------- trajectory planning & obstacle handling -------------
 
     def _rebuild_nominal_path(self, obs: dict[str, NDArray[np.floating]]):
         """
@@ -553,38 +554,58 @@ class MPCC(Controller):
 
         gate_normals, gate_y, gate_z = self._extract_gate_frames(gate_quats)
 
+        # 1. 基础路径连接
         base_waypoints = self._path_utils.build_gate_waypoints(
             self._initial_pos, gate_positions, gate_normals
         )
 
-        altitude_offset = 0.0
-        if base_waypoints.shape[0] > 1:
-            base_waypoints[1:, 2] += altitude_offset
-
+        # 2. 插入转弯平滑点
         with_gate_detours = self._insert_gate_detours(
-            base_waypoints,
-            gate_positions,
-            gate_normals,
-            gate_y,
-            gate_z,
+            base_waypoints, gate_positions, gate_normals, gate_y, gate_z,
         )
-        
-        virtual_gate_obs = self._generate_gate_frame_obstacles(
+
+        # 3. 获取虚拟门框障碍物
+        virt_pos, virt_types, virt_vecs, virt_lens = self._get_virtual_gate_obstacles(
             gate_positions, 
             gate_quats, 
-            gate_width=0.7,  # 基于 gate.xml 的尺寸
+            gate_width=0.7, 
             gate_height=0.7
         )
-        
-        # 将真实障碍物与虚拟障碍物合并
+
+        # 4. 合并障碍物并分配差异化半径
         if len(obstacle_positions) > 0:
-            all_obstacles = np.vstack([obstacle_positions, virtual_gate_obs])
+            all_obstacles = np.vstack([obstacle_positions, virt_pos])
+            
+            # 真实障碍物: 半径 0.30m (Type 0)
+            n_real = len(obstacle_positions)
+            margins_real = np.full(n_real, 0.30)
+            types_real = np.full(n_real, ObstacleType.CYLINDER_2D, dtype=int)
+            vecs_real  = np.zeros((n_real, 3))
+            lens_real  = np.zeros(n_real)
+            
+            
+            margins_gate = np.full(len(virt_pos), 0.2)
+            
+            
+            all_margins = np.concatenate([margins_real, margins_gate])
+            all_types   = np.concatenate([types_real, virt_types])
+            all_vecs    = np.vstack([vecs_real, virt_vecs])
+            all_lens    = np.concatenate([lens_real, virt_lens])
         else:
-            all_obstacles = virtual_gate_obs
-        # --- 新增代码  ---
+            all_obstacles = virt_pos
+            all_margins   = np.full(len(virt_pos), 0.2)
+            all_types     = virt_types
+            all_vecs      = virt_vecs
+            all_lens      = virt_lens
+
         
-        t_axis, collision_free_wps = self._inject_obstacle_detours(
-            with_gate_detours, all_obstacles, safe_dist=0.2
+        t_axis, collision_free_wps = self._apply_obstacle_avoidance(
+            with_gate_detours, 
+            all_obstacles, 
+            safe_dist_list=all_margins, 
+            types_list=all_types,
+            vecs_list=all_vecs,
+            lens_list=all_lens
         )
 
         if len(t_axis) < 2:
@@ -594,75 +615,109 @@ class MPCC(Controller):
             self.trajectory = CubicSpline(t_axis, collision_free_wps)
             self._planned_duration = float(self.trajectory.x[-1])
 
-    def _inject_obstacle_detours(
+    def _apply_obstacle_avoidance(
         self,
         base_waypoints: NDArray[np.floating],
         obstacles_pos: NDArray[np.floating],
-        safe_dist: float,
+        safe_dist_list: NDArray[np.floating], 
+        types_list: NDArray[np.int_],
+        vecs_list: NDArray[np.floating],
+        lens_list: NDArray[np.floating],
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """
-        Given a set of waypoints, generate a smooth path that stays at least
-        `safe_dist` away (in XY) from each obstacle by inserting additional points.
-        """
+        
         pre_spline = self._path_utils.spline_through_points(self._planned_duration, base_waypoints)
-
         n_samples = int(self._ctrl_freq * self._planned_duration)
-        if n_samples <= 0:
-            n_samples = 1
+        if n_samples <= 0: n_samples = 1
 
         t_axis = np.linspace(0.0, self._planned_duration, n_samples)
         wp_samples = pre_spline(t_axis)
 
-        for obst in obstacles_pos:
+        for obst_c, safe_dist, o_type, o_vec, o_len in zip(
+            obstacles_pos, safe_dist_list, types_list, vecs_list, lens_list
+        ):
             inside_region = False
-            new_t_vals: List[float] = []
-            new_points: List[np.ndarray] = []
+            new_t = []
+            new_pts = []
 
             for idx in range(wp_samples.shape[0]):
                 pt = wp_samples[idx]
-                dist_xy = np.linalg.norm(obst[:2] - pt[:2])
+                
+                # --- 1. 计算距离 (根据类型) ---
+                if o_type == ObstacleType.CYLINDER_2D:
+                    # 2D XY 距离
+                    dist = np.linalg.norm(obst_c[:2] - pt[:2])
+                elif o_type == ObstacleType.CAPSULE_3D:
+                    # 3D 点到线段距离
+                    vec_cp = pt - obst_c
+                    proj = np.dot(vec_cp, o_vec)
+                    proj_clamped = np.clip(proj, -o_len, o_len)
+                    closest_pt = obst_c + proj_clamped * o_vec
+                    dist = np.linalg.norm(pt - closest_pt)
+                else:
+                    dist = np.linalg.norm(obst_c - pt) # Fallback
 
-                if dist_xy < safe_dist and not inside_region:
+                # --- 2. 检测冲突 ---
+                if dist < safe_dist and not inside_region:
                     inside_region = True
-                    start_idx = idx
-                elif dist_xy >= safe_dist and inside_region:
-                    end_idx = idx
+                    idx_in = idx
+                elif dist >= safe_dist and inside_region:
                     inside_region = False
+                    idx_out = idx
+                    
+                    # --- 3. 计算推离方向 ---
+                    p_in = wp_samples[idx_in]
+                    p_out = wp_samples[idx_out]
+                    p_mid = 0.5 * (p_in + p_out)
+                    
+                    if o_type == ObstacleType.CYLINDER_2D:
+                        push_vec = p_mid - obst_c
+                        push_vec[2] = 0 # Z轴不产生推力
+                    elif o_type == ObstacleType.CAPSULE_3D:
+                        # 重新计算中点在障碍物上的最近点
+                        vec_cp = p_mid - obst_c
+                        proj = np.clip(np.dot(vec_cp, o_vec), -o_len, o_len)
+                        closest_on_seg = obst_c + proj * o_vec
+                        push_vec = p_mid - closest_on_seg
+                    else:
+                        push_vec = p_mid - obst_c
 
-                    direction_xy = (
-                        wp_samples[start_idx][:2] - obst[:2]
-                        + wp_samples[end_idx][:2] - obst[:2]
-                    )
-                    direction_xy /= np.linalg.norm(direction_xy) + 1e-6
+                    push_dir = push_vec / (np.linalg.norm(push_vec) + 1e-6)
 
-                    detour_xy = obst[:2] + direction_xy * safe_dist
-                    detour_z = 0.5 * (wp_samples[start_idx][2] + wp_samples[end_idx][2])
-                    detour_point = np.concatenate([detour_xy, [detour_z]])
+                    # --- 4. 生成避障点 ---
+                    if o_type == ObstacleType.CYLINDER_2D:
+                        # 柱状: 仅推 XY，Z 保持路径高度
+                        detour_xy = obst_c[:2] + push_dir[:2] * safe_dist
+                        detour_z = 0.5 * (p_in[2] + p_out[2])
+                        detour_pt = np.concatenate([detour_xy, [detour_z]])
+                    else:
+                        # 3D物体: 从最近点向外推 safe_dist
+                        # 注意：基准点应该是 closest_on_seg
+                        # 这里重新计算以确保准确
+                        vec_cp = p_mid - obst_c
+                        proj = np.clip(np.dot(vec_cp, o_vec), -o_len, o_len) if o_type == ObstacleType.CAPSULE_3D else 0
+                        base_pt = obst_c + proj * o_vec
+                        
+                        detour_pt = base_pt + push_dir * safe_dist
 
-                    new_t_vals.append(0.5 * (t_axis[start_idx] + t_axis[end_idx]))
-                    new_points.append(detour_point)
-                elif dist_xy >= safe_dist:
-                    new_t_vals.append(t_axis[idx])
-                    new_points.append(pt)
-
+                    new_t.append(0.5 * (t_axis[idx_in] + t_axis[idx_out]))
+                    new_pts.append(detour_pt)
+                    
+                elif dist >= safe_dist:
+                    new_t.append(t_axis[idx])
+                    new_pts.append(pt)
+            
             if inside_region:
-                new_t_vals.append(t_axis[-1])
-                new_points.append(wp_samples[-1])
+                new_t.append(t_axis[-1])
+                new_pts.append(wp_samples[-1])
 
-            t_axis = np.asarray(new_t_vals)
-            wp_samples = np.asarray(new_points)
+            t_axis = np.asarray(new_t)
+            wp_samples = np.asarray(new_pts)
 
         if t_axis.size > 0:
-            _, idx_unique = np.unique(t_axis, return_index=True)
-            t_axis = t_axis[idx_unique]
-            wp_samples = wp_samples[idx_unique]
-
-        if t_axis.size < 2:
-            print("[MPCC] Avoid_collision: too few points, reverting to original waypoints.")
-            fallback_t = self._path_utils.spline_through_points(self._planned_duration, base_waypoints).x
-            return fallback_t, base_waypoints
-
-        return t_axis, wp_samples
+            _, uniq = np.unique(t_axis, return_index=True)
+            return t_axis[uniq], wp_samples[uniq]
+        
+        return np.array([]), np.array([])
 
     def _detect_event_change(self, obs: dict[str, NDArray[np.bool_]]) -> bool:
         """
@@ -707,7 +762,7 @@ class MPCC(Controller):
         gate_y_axes: NDArray[np.floating],
         gate_z_axes: NDArray[np.floating],
         num_intermediate_points: int = 5,
-        angle_threshold: float = 110.0,
+        angle_threshold: float = 120.0,
         detour_distance: float = 0.65,
     ) -> NDArray[np.floating]:
 

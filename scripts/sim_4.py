@@ -1,0 +1,179 @@
+"""Simulate the competition as in the IROS 2022 Safe Robot Learning competition.
+
+Run as:
+
+    $ python scripts/sim.py --config level0.toml
+
+Look for instructions in `README.md` and in the official documentation.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import fire
+import gymnasium
+import jax.numpy as jp
+import numpy as np
+from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
+
+from lsy_drone_racing.utils import load_config, load_controller
+from lsy_drone_racing.utils import draw_line  
+
+if TYPE_CHECKING:
+    from ml_collections import ConfigDict
+
+    from lsy_drone_racing.control.controller import Controller
+    from lsy_drone_racing.envs.drone_race import DroneRaceEnv
+
+
+logger = logging.getLogger(__name__)
+
+
+def simulate(
+    config: str = "level2.toml",
+    controller: str | None = None,
+    n_runs: int = 10,
+    render: bool | None = None,
+) -> list[float]:
+    """Evaluate the drone controller over multiple episodes.
+
+    Args:
+        config: The path to the configuration file. Assumes the file is in `config/`.
+        controller: The name of the controller file in `lsy_drone_racing/control/` or None. If None,
+            the controller specified in the config file is used.
+        n_runs: The number of episodes.
+        render: Enable/disable rendering the simulation.
+
+    Returns:
+        A list of episode times.
+    """
+    # Load configuration and check if firmare should be used.
+    config = load_config(Path(__file__).parents[1] / "config" / config)
+    if render is None:
+        render = config.sim.render
+    else:
+        config.sim.render = render
+    # Load the controller module
+    control_path = Path(__file__).parents[1] / "lsy_drone_racing/control"
+    controller_path = control_path / (controller or config.controller.file)
+    controller_cls = load_controller(controller_path)  # This returns a class, not an instance
+    # Create the racing environment
+    env: DroneRaceEnv = gymnasium.make(
+        config.env.id,
+        freq=config.env.freq,
+        sim_config=config.sim,
+        sensor_range=config.env.sensor_range,
+        control_mode=config.env.control_mode,
+        track=config.env.track,
+        disturbances=config.env.get("disturbances"),
+        randomizations=config.env.get("randomizations"),
+        seed=config.env.seed,
+    )
+    env = JaxToNumpy(env)
+
+    ep_times = []
+    for _ in range(n_runs):  # Run n_runs episodes with the controller
+        obs, info = env.reset()
+        controller: Controller = controller_cls(obs, info, config)
+        i = 0
+        fps = 60
+
+        while True:
+            curr_time = i / config.env.freq
+
+            action = controller.compute_control(obs, info)
+            # Convert to a buffer that meets XLA's alginment restrictions to prevent warnings. See
+            # https://github.com/jax-ml/jax/discussions/6055
+            # Tracking issue:
+            # https://github.com/jax-ml/jax/issues/29810
+            action = np.asarray(jp.asarray(action), copy=True)
+
+            obs, reward, terminated, truncated, info = env.step(action)
+            print(
+                f"[step {i}] "
+                f"time={curr_time:.3f}s "
+                f"target_gate={int(np.asarray(obs['target_gate']).item())} "
+                f"terminated={terminated} truncated={truncated} "
+                f"reward={reward:.3f} "
+                f"pos={obs['pos']} "
+                f"quat={obs['quat']} "
+                f"action={action}"
+            )
+            # Update the controller internal state and models.
+            controller_finished = controller.step_callback(
+                action, obs, reward, terminated, truncated, info
+            )
+            # Add up reward, collisions
+            if terminated or truncated or controller_finished:
+                print(
+                    f"--> breaking loop at step {i}: "
+                    f"terminated={terminated}, truncated={truncated}, "
+                    f"controller_finished={controller_finished}"
+                )
+                # also dump info dict for clues
+                print(f"final info keys: {list(info.keys())}")
+                try:
+                    print(f"info: {info}")
+                except Exception:
+                    pass
+                break
+            # if config.sim.render:  # Render the sim if selected.
+            #     if ((i * fps) % config.env.freq) < fps:
+            #         env.render()
+            if config.sim.render:  # Render the sim if selected.
+                if ((i * fps) % config.env.freq) < fps:
+                    if hasattr(controller, "get_debug_lines"):
+                        try:
+                            for pts, rgba, smin, smax in controller.get_debug_lines():
+                                draw_line(env, pts, rgba=rgba, min_size=smin, max_size=smax)
+                        except Exception as e:
+                            print(f"[viz] draw_line warning: {e}")
+                    env.render()
+            i += 1
+
+        controller.episode_callback()  # Update the controller internal state and models.
+        log_episode_stats(obs, info, config, curr_time)
+        controller.episode_reset()
+        ep_times.append(curr_time if obs["target_gate"] == -1 else None)
+
+    # Close the environment
+    successes = sum(t is not None for t in ep_times)
+    success_rate = successes / max(1, n_runs)
+    avg_time = (
+        float(np.mean([t for t in ep_times if t is not None])) if successes > 0 else float("nan")
+    )
+
+    # 终端打印（Fire 不会显示返回值，所以这里必须 print）
+    print(
+        "\n=== Simulation Summary ===\n"
+        f"Runs: {n_runs}\n"
+        f"Successes: {successes}\n"
+        f"Success rate: {success_rate*100:.1f}%\n"
+        f"Avg finish time (success only): {avg_time:.3f}s\n"
+    )
+
+    # 如果你在其他地方想用，也可以返回成功率（尽管 Fire 这行不会显示）
+    
+    env.close()
+    return ep_times
+
+
+def log_episode_stats(obs: dict, info: dict, config: ConfigDict, curr_time: float):
+    """Log the statistics of a single episode."""
+    gates_passed = obs["target_gate"]
+    if gates_passed == -1:  # The drone has passed the final gate
+        gates_passed = len(config.env.track.gates)
+    finished = gates_passed == len(config.env.track.gates)
+    logger.info(
+        f"Flight time (s): {curr_time}\nFinished: {finished}\nGates passed: {gates_passed}\n"
+    )
+
+
+if __name__ == "__main__":
+    logging.basicConfig()
+    logging.getLogger("lsy_drone_racing").setLevel(logging.INFO)
+    logger.setLevel(logging.INFO)
+    fire.Fire(simulate, serialize=lambda _: None)
