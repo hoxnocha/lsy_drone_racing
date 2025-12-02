@@ -261,12 +261,9 @@ class MPCC(Controller):
         mass_val = float(self.drone_params["mass"])
         GRAVITY = -float(self.drone_params["gravity_vec"][-1])
 
-        # 2. 提取/计算 加速度系数 (Force -> Acceleration)
-        # 我们期望输入 f_collective 是牛顿 (N)
-        # 理论上: acc = f / mass => acc_coef = [1/mass, 0]
         
         acc_coef_raw = self.drone_params.get("acc_coef", 0.0)
-        acc_coef_arr = np.atleast_1d(acc_coef_raw)
+        
 
         
         params_acc = [1.0 / mass_val, 0.0]
