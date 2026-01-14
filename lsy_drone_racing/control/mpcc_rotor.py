@@ -627,26 +627,26 @@ class MPCC(Controller):
         ocp.cost.cost_type = "EXTERNAL"
 
         # --------- 权重设置（可以再微调） ----------
-        self.q_l = 200 #51.12177012488246 
-        self.q_c = 100 #263.4813310112804 
+        self.q_l = 522.327621281147 #200 
+        self.q_c = 279.45878291502595 #100 
         self.Q_w = 1 * DM(np.eye(3))
 
         # 门附近：贴轨更硬
-        self.q_l_gate_peak = 640 #825.7920374162495 
-        self.q_c_gate_peak = 800 #839.0019377693534 
+        self.q_l_gate_peak = 520.2687042765319 #640
+        self.q_c_gate_peak = 764.3037075176835 #800
 
         # 障碍物附近：贴轨也加强，但稍微弱一点
-        self.q_l_obst_peak = 100 #270.4178145620972 
-        self.q_c_obst_peak = 50 #175.27897208929062 
+        self.q_l_obst_peak = 207.83845749683678 #100 
+        self.q_c_obst_peak = 110.51885732449591 #50 
 
         self.R_df = DM(np.diag([0.1, 0.5, 0.5, 0.5]))
 
         # 进度项基础奖励
-        self.miu = 8 # 18.42138583958149 
+        self.miu = 14.3377785384655#6.613274002447724 
         # 门减速强一点
-        self.w_v_gate =2.5
+        self.w_v_gate = 2.7327203765511516#2.5
         # 障碍物减速弱一点
-        self.w_v_obst = 0.5 #0.6442799213342368 
+        self.w_v_obst = 2.460291111562401 #0.5 
 
         ocp.model.cost_expr_ext_cost = self._stage_cost_expression()
 

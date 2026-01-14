@@ -18,7 +18,7 @@ def evaluation_function(parameters):
     result = simulate(
         config="level2.toml", 
         controller="mpcc_rotor_tune.py",  # <--- 已修改：指向您的新控制器文件
-        n_runs=10,      # 每次评估跑4轮取平均，减少随机性
+        n_runs=8,      # 每次评估跑4轮取平均，减少随机性
         render=False,  # 关闭渲染加速
         tuning_params=parameters
     )
@@ -30,7 +30,7 @@ def evaluation_function(parameters):
     
 
     
-    if success_rate < 0.5:
+    if success_rate < 0.7:
         return {"reward": (-500.0 - 100.0 * fail_rate, 0.0)}
 
     # 2. 有效时间处理 (防止全炸时 avg_time=999 导致数值异常)
@@ -73,8 +73,8 @@ ax_client.create_experiment(
         #{"name": "T_HORIZON", "type": "range", "bounds": [0.5, 1.0]},
         
         # --- 轨迹追踪权重 (基础) ---
-        {"name": "q_l", "type": "range", "bounds": [10.0, 250.0]}, # Lag error
-        {"name": "q_c", "type": "range", "bounds": [100.0, 300.0]}, # Contour error
+        {"name": "q_l", "type": "range", "bounds": [200.0, 600.0]}, # Lag error
+        {"name": "q_c", "type": "range", "bounds": [100.0, 400.0]}, # Contour error
         
         # --- 门附近权重增强 ---
         # 通常需要比基础权重高很多，以确保穿门精度
@@ -87,19 +87,19 @@ ax_client.create_experiment(
 
         # --- 速度权重 (MiU) ---
         # 决定了飞行的激进程度
-        {"name": "miu", "type": "range", "bounds": [5.0, 15.0]},   
+        {"name": "miu", "type": "range", "bounds": [7.0, 15.0]},   
         
         # --- 减速权重 ---
         # 遇到门或障碍物时减速的倾向
         {"name": "w_v_gate", "type": "range", "bounds": [0.1, 5.0]},
-        {"name": "w_v_obst", "type": "range", "bounds": [0.1, 2.0]},
+        {"name": "w_v_obst", "type": "range", "bounds": [0.1, 3.0]},
     ],
     # 目标：最大化 reward
     objectives={"reward": ObjectiveProperties(minimize=False)},
 )
 
 # 4. 运行优化循环
-TOTAL_TRIALS = 50  # 建议 50-100 次以获得较好结果
+TOTAL_TRIALS = 100  # 建议 50-100 次以获得较好结果
 
 print(f"Starting optimization for {TOTAL_TRIALS} trials...")
 
