@@ -312,8 +312,8 @@ class MPCC(Controller):
         self._rebuild_nominal_path_gate(obs)
 
         # MPC 配置
-        self.N = 35 #35       
-        self.T_HORIZON = 0.7  #0.7
+        self.N = 40 #35       
+        self.T_HORIZON = 0.8  #0.7
         self.dt = self.T_HORIZON / self.N
         self.model_arc_length = 0.05
         self.model_traj_length = 12.0
@@ -646,7 +646,7 @@ class MPCC(Controller):
         # 门减速强一点
         self.w_v_gate = 2.7327203765511516#2.5
         # 障碍物减速弱一点
-        self.w_v_obst = 2.460291111562401 #0.5 
+        self.w_v_obst = 0.8 #2.460291111562401 #0.5 
 
         ocp.model.cost_expr_ext_cost = self._stage_cost_expression()
 
