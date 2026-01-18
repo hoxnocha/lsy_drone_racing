@@ -18,9 +18,6 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
  
-# ----------------------------- 工具类 -----------------------------
-#so_rpy_rotor_drag & 把 mpcc_12 优化
-
 
 class FrameUtils:
 

@@ -27,14 +27,14 @@ def evaluation_function(parameters):
     fail_rate = 1.0 - success_rate
     
     # very strong penalty for success rate below 0.7
-    if success_rate < 0.7:
+    if success_rate < 0.75:
         return {"reward": (-500.0 - 100.0 * fail_rate, 0.0)}
 
     # If no success at all, set time as 20 seconds
     effective_time = avg_time if success_rate > 0 else 20.0
     # every seconds faster than 8 seconds, get score of 8
     baseline_time = 8.0
-    speed_score = (baseline_time - effective_time) * 8
+    speed_score = (baseline_time - effective_time) * 5
     #Quadratic Risk Penalty
     risk_penalty = 10.0 * (fail_rate ** 2)
     reward = speed_score - risk_penalty
@@ -50,7 +50,7 @@ ax_client.create_experiment(
         #{"name": "T_HORIZON", "type": "range", "bounds": [0.5, 1.0]},
       
         {"name": "q_l", "type": "range", "bounds": [450.0, 700.0]}, # Lag error
-        {"name": "q_c", "type": "range", "bounds": [100.0, 400.0]}, # Contour error
+        {"name": "q_c", "type": "range", "bounds": [100.0, 450.0]}, # Contour error
         {"name": "q_l_gate_peak", "type": "range", "bounds": [500.0, 1000.0]},
         {"name": "q_c_gate_peak", "type": "range", "bounds": [600.0, 1000.0]},
         {"name": "q_l_obst_peak", "type": "range", "bounds": [100.0, 350.0]},
@@ -62,7 +62,7 @@ ax_client.create_experiment(
     objectives={"reward": ObjectiveProperties(minimize=False)},
 )
 
-TOTAL_TRIALS = 100 
+TOTAL_TRIALS = 3000
 
 print(f"Starting optimization for {TOTAL_TRIALS} trials...")
 
