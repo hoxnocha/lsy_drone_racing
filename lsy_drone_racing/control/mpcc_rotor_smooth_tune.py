@@ -720,24 +720,36 @@ class MPCC(Controller):
         # 约束
         thrust_min = float(self._dyn_params["thrust_min"]) * 4.0
         thrust_max = float(self._dyn_params["thrust_max"]) * 4.0
+
+        idx_r = self.idx_r_cmd_state
+        idx_p = self.idx_p_cmd_state
+        idx_y = self.idx_y_cmd_state
+        idx_f_cmd = self.idx_f_cmd_state
+        idx_f_act = self.idx_f_act
         
         ocp.constraints.lbx = np.array([thrust_min, thrust_min, -1.57, -1.57, -1.57])
         ocp.constraints.ubx = np.array([thrust_max, thrust_max, 1.57, 1.57, 1.57])
-        ocp.constraints.idxbx = np.array([self.idx_f_act, self.idx_f_cmd, 
-                                          self.idx_r_cmd_state, self.idx_p_cmd_state, self.idx_y_cmd_state])
+        ocp.constraints.idxbx = np.array([idx_f_act, idx_f_cmd, idx_r, idx_p, idx_y])
 
-        limit_arr = np.array([self.rate_limit_df] + [self.rate_limit_drpy]*3 + [self.rate_limit_v_theta])
-        ocp.constraints.lbu = np.concatenate([-limit_arr[:-1], [0.0]])
-        ocp.constraints.ubu = limit_arr
-        ocp.constraints.idxbu = np.arange(5)
-
+        ocp.constraints.lbu = np.array([-self.rate_limit_df, -self.rate_limit_drpy, -self.rate_limit_drpy, -self.rate_limit_drpy, 0.0])
+        ocp.constraints.ubu = np.array([self.rate_limit_df, self.rate_limit_drpy, self.rate_limit_drpy, self.rate_limit_drpy, self.rate_limit_v_theta])
+        ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
+        
+        # Initial Parameters
         ocp.constraints.x0 = np.zeros(self.nx)
-        ocp.parameter_values = np.zeros(model.p.rows())
+        param_vec = self._encode_traj_params(self.arc_trajectory)
+        ocp.parameter_values = param_vec
 
+        # Solver configuration
         ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
         ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
         ocp.solver_options.integrator_type = "ERK"
         ocp.solver_options.nlp_solver_type = "SQP_RTI"
+        ocp.solver_options.tol = 1e-5
+        ocp.solver_options.qp_solver_cond_N = N_horizon
+        ocp.solver_options.qp_solver_warm_start = 1
+        ocp.solver_options.qp_solver_iter_max = 20
+        ocp.solver_options.nlp_solver_max_iter = 50
         ocp.solver_options.tf = Tf
 
         solver = AcadosOcpSolver(ocp, json_file="mpcc_prescripted_real_dyn.json", verbose=False)

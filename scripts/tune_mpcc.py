@@ -16,7 +16,7 @@ def evaluation_function(parameters):
 
     result = simulate(
         config="level2.toml", 
-        controller="mpcc_rotor_tune.py",  # controller to be tuned
+        controller="mpcc_rotor_edit_tune.py",  # controller to be tuned
         n_runs=8,      # runs for each groups of parameters
         render=False,  
         tuning_params=parameters
@@ -26,7 +26,7 @@ def evaluation_function(parameters):
     success_rate = result["success_rate"]
     fail_rate = 1.0 - success_rate
     
-    # very strong penalty for success rate below 0.7
+    # very strong penalty for success rate below 0.75
     if success_rate < 0.75:
         return {"reward": (-500.0 - 100.0 * fail_rate, 0.0)}
 
@@ -34,9 +34,9 @@ def evaluation_function(parameters):
     effective_time = avg_time if success_rate > 0 else 20.0
     # every seconds faster than 8 seconds, get score of 8
     baseline_time = 8.0
-    speed_score = (baseline_time - effective_time) * 5
+    speed_score = (baseline_time - effective_time) * 2
     #Quadratic Risk Penalty
-    risk_penalty = 10.0 * (fail_rate ** 2)
+    risk_penalty = 20.0 * (fail_rate ** 2)
     reward = speed_score - risk_penalty
    
     print(f"[AutoTune] Result: Time={avg_time:.2f}s, Success={success_rate*100:.0f}%, Reward={reward:.2f}")
@@ -50,10 +50,10 @@ ax_client.create_experiment(
         #{"name": "T_HORIZON", "type": "range", "bounds": [0.5, 1.0]},
       
         {"name": "q_l", "type": "range", "bounds": [450.0, 700.0]}, # Lag error
-        {"name": "q_c", "type": "range", "bounds": [100.0, 450.0]}, # Contour error
-        {"name": "q_l_gate_peak", "type": "range", "bounds": [500.0, 1000.0]},
+        {"name": "q_c", "type": "range", "bounds": [100.0, 550.0]}, # Contour error
+        {"name": "q_l_gate_peak", "type": "range", "bounds": [300.0, 1000.0]},
         {"name": "q_c_gate_peak", "type": "range", "bounds": [600.0, 1000.0]},
-        {"name": "q_l_obst_peak", "type": "range", "bounds": [100.0, 350.0]},
+        {"name": "q_l_obst_peak", "type": "range", "bounds": [100.0, 450.0]},
         {"name": "q_c_obst_peak", "type": "range", "bounds": [50.0, 200.0]},
         {"name": "miu", "type": "range", "bounds": [8.0, 17.0]},   
         {"name": "w_v_gate", "type": "range", "bounds": [0.1, 5.0]},
@@ -62,7 +62,7 @@ ax_client.create_experiment(
     objectives={"reward": ObjectiveProperties(minimize=False)},
 )
 
-TOTAL_TRIALS = 3000
+TOTAL_TRIALS = 300
 
 print(f"Starting optimization for {TOTAL_TRIALS} trials...")
 
