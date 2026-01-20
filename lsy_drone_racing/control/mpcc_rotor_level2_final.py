@@ -588,14 +588,14 @@ class MPCC(Controller):
         self.Q_w = 1 * DM(np.eye(3))
 
         self.q_l_gate_peak = 520.2687042765319
-        self.q_c_gate_peak = 820#764.3037075176835
+        self.q_c_gate_peak = 764.3037075176835#820
 
         self.q_l_obst_peak = 207.83845749683678
-        self.q_c_obst_peak = 130#110.51885732449591
+        self.q_c_obst_peak = 110.51885732449591 #130
 
         self.R_df = DM(np.diag([0.1, 0.5, 0.5, 0.5]))
 
-        self.miu = 13.8#14.3377785384655
+        self.miu = 14.3377785384655 #13.8
         self.w_v_gate = 2.7327203765511516
         self.w_v_obst = 2.460291111562401
 
