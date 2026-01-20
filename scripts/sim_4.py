@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def simulate(
     config: str = "level2.toml",
     controller: str | None = None,
-    n_runs: int = 10,
+    n_runs: int = 100,
     render: bool | None = None,
 ) -> list[float]:
     """Evaluate the drone controller over multiple episodes.

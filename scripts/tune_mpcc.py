@@ -1,5 +1,5 @@
 """
-Using Ax (TuRBO) for parameter auto tuning
+Using Ax for parameter auto tuning
 Run: python scripts/tune_mpcc.py
 """
 import sys
