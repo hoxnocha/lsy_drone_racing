@@ -16,7 +16,7 @@ def evaluation_function(parameters):
 
     result = simulate(
         config="level2.toml", 
-        controller="mpcc_rotor_edit_tune.py",  # controller to be tuned
+        controller="mpcc_rotor_for_tuning.py",  # controller to be tuned
         n_runs=8,      # runs for each groups of parameters
         render=False,  
         tuning_params=parameters

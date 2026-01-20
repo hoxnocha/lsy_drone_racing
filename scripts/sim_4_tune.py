@@ -1,10 +1,9 @@
-"""Simulate the competition as in the IROS 2022 Safe Robot Learning competition.
+"""Simulate the competition but run multiple times and calculate the average speed and success rate. Meanly for auto tuning
 
 Run as:
 
-    $ python scripts/sim.py --config level0.toml
+    $ python scripts/sim_4_tune.py --config level0.toml
 
-Look for instructions in `README.md` and in the official documentation.
 """
 
 from __future__ import annotations
@@ -32,36 +31,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ... (前面的 import 保持不变) ...
-
 def simulate(
     config: str = "level2.toml",
     controller: str | None = None,
-    n_runs: int = 3,  # [修改] 默认跑3次取平均，节省时间
-    render: bool | None = False, # [修改] 默认不渲染
-    tuning_params: dict | None = None, # [新增] 接收调参字典
-) -> dict: # [修改] 返回字典而不是 list
+    n_runs: int = 3, 
+    render: bool | None = False, 
+    tuning_params: dict | None = None,
+) -> dict: 
     """Evaluate the drone controller for Auto-Tuning."""
     
-    # 1. 加载 Config
     config_obj = load_config(Path(__file__).parents[1] / "config" / config)
-    
-    # [新增] 注入调参参数
+
     if tuning_params is not None:
-        # 动态给 config 对象添加属性，供 Controller 读取
         config_obj.tuning = tuning_params
     
     if render is None:
         render = config_obj.sim.render
     else:
         config_obj.sim.render = render
-
-    # 2. 加载控制器类
     control_path = Path(__file__).parents[1] / "lsy_drone_racing/control"
     controller_path = control_path / (controller or config_obj.controller.file)
     controller_cls = load_controller(controller_path)
 
-    # 3. 创建环境
     env: DroneRaceEnv = gymnasium.make(
         config_obj.env.id,
         freq=config_obj.env.freq,
@@ -82,13 +73,11 @@ def simulate(
     for _ in range(n_runs):
         obs, info = env.reset()
         
-        # [保护] 控制器初始化可能会因为参数极值而报错
         try:
             controller_instance = controller_cls(obs, info, config_obj)
         except Exception as e:
             print(f"[AutoTune] Controller init failed: {e}")
             env.close()
-            # 返回极差的结果
             return {"avg_time": 999.0, "success_rate": 0.0, "crashes": n_runs}
 
         i = 0

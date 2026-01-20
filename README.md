@@ -27,6 +27,18 @@ Whether you’re new to drones or an experienced developer, this project provide
 
 ---
 
+## Running Instruction
+
+For challenge setup level2, use controller mpcc_rotor_level2_final.py, this is the version after Auto-tuning. It balances the track time and robustness.
+
+For challenge setup level3, use controller mpcc_rotor_level3.py. It achived track time of 6.1 seconds in real-time deployment.
+
+For Auto-Tuning, run python scripts/tune_mpcc.py, in default config is controller mpcc_rotor_for_tuning.py being tuned. Parameter range is also set up in this script. If you want to tune other controller, make sure your controller accept variable parameters as in mpcc_rotor_for_tuning.py.
+
+---
+
+---
+
 ## Documentation
 
 To get started, visit our [official documentation](https://lsy-drone-racing.readthedocs.io/en/latest/getting_started/general.html).

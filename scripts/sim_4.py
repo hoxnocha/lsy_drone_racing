@@ -1,8 +1,8 @@
-"""Simulate the competition as in the IROS 2022 Safe Robot Learning competition.
+"""Simulate the competition run multiple times and calculate the average speed and success rate..
 
 Run as:
 
-    $ python scripts/sim.py --config level0.toml
+    $ python scripts/sim_4.py --config level0.toml
 
 Look for instructions in `README.md` and in the official documentation.
 """
