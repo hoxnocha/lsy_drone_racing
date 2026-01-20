@@ -185,113 +185,150 @@ class RacingPathPlanner:
 
         return np.asarray(wp_list)
 
+    def _find_collision_indices(
+        self,
+        trajectory_points: NDArray[np.floating],
+        obstacle_pos: NDArray[np.floating],
+        safe_dist: float
+    ) -> Tuple[int, int, bool]:
+        """
+        Identifies the start and end indices of the trajectory segment that violates 
+        the safety distance.
+        """
+        d_xy = np.linalg.norm(trajectory_points[:, :2] - obstacle_pos[:2], axis=1)
+        inside_mask = d_xy < safe_dist
+
+        if not np.any(inside_mask):
+            return -1, -1, False
+
+        inside_indices = np.where(inside_mask)[0]
+        start_idx = max(int(inside_indices[0]) - 1, 0)
+        end_idx = min(int(inside_indices[-1]) + 1, len(trajectory_points) - 1)
+
+        # Check if the segment is valid (has length)
+        if end_idx <= start_idx + 1:
+            return -1, -1, False
+            
+        return start_idx, end_idx, True
+
+    def _generate_arc_detour(
+        self,
+        p_start: NDArray[np.floating],
+        p_end: NDArray[np.floating],
+        center: NDArray[np.floating],
+        radius: float,
+        n_points: int
+    ) -> NDArray[np.floating]:
+        """
+        Generates a 3D arc of points around a center between start and end points.
+        """
+        # 1. Calculate vectors from center to start/end
+        v_start = p_start[:2] - center[:2]
+        v_end = p_end[:2] - center[:2]
+        
+        # Normalize
+        nrm_s = np.linalg.norm(v_start) + 1e-9
+        nrm_e = np.linalg.norm(v_end) + 1e-9
+        v_start /= nrm_s
+        v_end /= nrm_e
+
+        # 2. Calculate angles
+        theta_start = np.arctan2(v_start[1], v_start[0])
+        theta_end = np.arctan2(v_end[1], v_end[0])
+
+        # 3. Handle angle wrapping (ensure shortest path around circle)
+        d_theta = theta_end - theta_start
+        if d_theta > np.pi:
+            d_theta -= 2.0 * np.pi
+        elif d_theta < -np.pi:
+            d_theta += 2.0 * np.pi
+
+        # 4. Generate points
+        theta_list = np.linspace(theta_start, theta_start + d_theta, n_points + 2)[1:-1]
+        detour_points = []
+        
+        for i, th in enumerate(theta_list):
+            # Interpolate Z (height) linearly
+            alpha = (i + 1) / (n_points + 1)
+            z = (1.0 - alpha) * p_start[2] + alpha * p_end[2]
+            
+            # XY position on circle
+            p_x = center[0] + radius * np.cos(th)
+            p_y = center[1] + radius * np.sin(th)
+            detour_points.append(np.array([p_x, p_y, z]))
+
+        return np.array(detour_points)
+
     def inject_obstacle_detours(
         self,
         base_waypoints: NDArray[np.floating],
         obstacles_pos: NDArray[np.floating],
         planned_duration: float,
-        gate_positions: NDArray[np.floating], # Needed for margin check
+        gate_positions: NDArray[np.floating],
         safe_dist: float,
         arc_n: int = 5,
     ) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
         """
-        Injects circular detours around obstacles.
+        Injects circular detours around obstacles where the path violates safety margins.
         """
+        # 1. Initial Sampling
         pre_spline = self.spline_through_points(planned_duration, base_waypoints)
-
-        n_samples = int(self.ctrl_freq * planned_duration)
-        if n_samples <= 0: n_samples = 1
-
+        n_samples = max(int(self.ctrl_freq * planned_duration), 2)
+        
         t_axis = np.linspace(0.0, planned_duration, n_samples)
         wp_samples = pre_spline(t_axis)
 
-        gate_margin = 3
+        gate_margin = 3 # indices margin to avoid modifying path inside a gate
 
+        # 2. Iterate over obstacles
         for obst in obstacles_pos:
-            gate_idx = np.array([], dtype=int)
+            
+            # Check collision
+            start_idx, end_idx, collision = self._find_collision_indices(wp_samples, obst, safe_dist)
+            if not collision:
+                continue
+
+            # Check if this collision is too close to a gate (don't modify gate entry)
+            # (Simplified check: look for nearest gate index)
+            is_near_gate = False
             if len(gate_positions) > 0:
-                idx_list = []
-                for g in gate_positions:
-                    d_g = np.linalg.norm(wp_samples - g, axis=1)
-                    idx_list.append(int(np.argmin(d_g)))
-                gate_idx = np.asarray(idx_list, dtype=int)
-
-            d_xy = np.linalg.norm(wp_samples[:, :2] - obst[:2], axis=1)
-            inside = d_xy < safe_dist
-
-            if not np.any(inside):
+                # Find indices of points closest to gates
+                gate_indices = [np.argmin(np.linalg.norm(wp_samples - g, axis=1)) for g in gate_positions]
+                gate_indices = np.array(gate_indices)
+                
+                # Check overlap
+                if np.any((gate_indices >= start_idx - gate_margin) & (gate_indices <= end_idx + gate_margin)):
+                    is_near_gate = True
+            
+            if is_near_gate:
                 continue
 
-            inside_idx = np.where(inside)[0]
-            start_idx = int(inside_idx[0]) - 1
-            end_idx = int(inside_idx[-1]) + 1
-
-            start_idx = max(start_idx, 0)
-            end_idx = min(end_idx, len(t_axis) - 1)
-
-            if end_idx <= start_idx + 1:
-                continue
-
-            # Gate Margin check
-            if gate_idx.size > 0:
-                if np.any((gate_idx >= start_idx - gate_margin) & (gate_idx <= end_idx + gate_margin)):
-                    continue
-
-            # Geometry construction
+            # 3. Generate Detour
             p_start = wp_samples[start_idx]
             p_end = wp_samples[end_idx]
-
-            v_start = p_start[:2] - obst[:2]
-            v_end = p_end[:2] - obst[:2]
-            nrm_s = np.linalg.norm(v_start)
-            nrm_e = np.linalg.norm(v_end)
-            if nrm_s < 1e-6 or nrm_e < 1e-6:
-                continue
-
-            v_start /= nrm_s
-            v_end /= nrm_e
-
-            theta_start = np.arctan2(v_start[1], v_start[0])
-            theta_end = np.arctan2(v_end[1], v_end[0])
-
-            d_theta = theta_end - theta_start
-            if d_theta > np.pi: d_theta -= 2.0 * np.pi
-            elif d_theta < -np.pi: d_theta += 2.0 * np.pi
-
-            theta_list = np.linspace(theta_start, theta_start + d_theta, arc_n + 2)[1:-1]
+            
             t_start = t_axis[start_idx]
             t_end = t_axis[end_idx]
-            t_list = np.linspace(t_start, t_end, arc_n + 2)[1:-1]
+            t_detour = np.linspace(t_start, t_end, arc_n + 2)[1:-1]
+            
+            detour_pts = self._generate_arc_detour(p_start, p_end, obst, safe_dist, arc_n)
 
-            detour_points = []
-            for i, th in enumerate(theta_list):
-                dir_xy = np.array([np.cos(th), np.sin(th)], dtype=float)
-                p_xy = obst[:2] + dir_xy * safe_dist
-                alpha = (i + 1) / (arc_n + 1)
-                z = (1.0 - alpha) * p_start[2] + alpha * p_end[2]
-                detour_points.append(np.array([p_xy[0], p_xy[1], z], dtype=float))
+            # 4. Splice Arrays
+            # Construct new lists: [Head] + [Detour] + [Tail]
+            new_t = np.concatenate([t_axis[:start_idx+1], t_detour, t_axis[end_idx:]])
+            new_wp = np.concatenate([wp_samples[:start_idx+1], detour_pts, wp_samples[end_idx:]])
 
-            # Splice arrays
-            new_t_vals = list(t_axis[:start_idx+1])
-            new_points = list(wp_samples[:start_idx+1])
-            for t_i, p_i in zip(t_list, detour_points):
-                new_t_vals.append(float(t_i))
-                new_points.append(p_i)
-            for i in range(end_idx, len(t_axis)):
-                new_t_vals.append(t_axis[i])
-                new_points.append(wp_samples[i])
+            t_axis = new_t
+            wp_samples = new_wp
 
-            t_axis = np.asarray(new_t_vals)
-            wp_samples = np.asarray(new_points)
-
-        # Final cleanup
+        # 5. Finalize
         if t_axis.size > 0:
             _, idx_unique = np.unique(t_axis, return_index=True)
             t_axis = t_axis[idx_unique]
             wp_samples = wp_samples[idx_unique]
 
         if t_axis.size < 2:
-            print("[MPCC] Avoid_collision: too few points, reverting.")
+            print("[Planner] Warning: Avoidance path invalid, reverting to nominal.")
             fallback_t = self.spline_through_points(planned_duration, base_waypoints).x
             return fallback_t, base_waypoints
 

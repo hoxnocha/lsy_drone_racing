@@ -5,7 +5,7 @@ Run: python scripts/tune_mpcc_turbo.py
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from scripts.sim_4_tune import simulate 
+from lsy_drone_racing.scripts.sim_cal_tune import simulate 
 import math
 import torch
 import numpy as np

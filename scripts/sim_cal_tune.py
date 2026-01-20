@@ -2,7 +2,7 @@
 
 Run as:
 
-    $ python scripts/sim_4_tune.py --config level0.toml
+    $ python scripts/sim_cal_tune.py --config level0.toml
 
 """
 

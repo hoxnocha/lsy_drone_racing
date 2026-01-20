@@ -2,7 +2,7 @@
 
 Run as:
 
-    $ python scripts/sim_4.py --config level0.toml
+    $ python scripts/sim_calculate_average_speed.py --config level0.toml
 
 Look for instructions in `README.md` and in the official documentation.
 """
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 def simulate(
     config: str = "level2.toml",
     controller: str | None = None,
-    n_runs: int = 100,
+    n_runs: int = 20,
     render: bool | None = None,
 ) -> list[float]:
     """Evaluate the drone controller over multiple episodes.

@@ -17,10 +17,6 @@ from lsy_drone_racing.control import Controller
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
- 
-# ----------------------------- 工具类 -----------------------------
-# so_rpy_rotor & 把 mpcc_9 加上与 mpcc_4 同等复杂度的执行器滞后 + 速率限制
-
 
 class FrameUtils:
 

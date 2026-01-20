@@ -233,6 +233,52 @@ class RacingPathPlanner:
             np.asarray(obs_lens, dtype=float),
         )
 
+    def _compute_obstacle_geometry(
+        self,
+        pt: NDArray[np.floating],
+        obst_c: NDArray[np.floating],
+        o_type: int,
+        o_vec: NDArray[np.floating],
+        o_len: float,
+    ) -> Tuple[float, NDArray[np.floating]]:
+        """
+        Computes the distance to an obstacle and the vector required to push away from it.
+
+        Args:
+            pt: Current point on the trajectory (3,).
+            obst_c: Center position of the obstacle (3,).
+            o_type: Integer enum (0 for CYLINDER_2D, 2 for CAPSULE_3D).
+            o_vec: Direction vector for CAPSULE_3D (3,).
+            o_len: Half-length for CAPSULE_3D.
+
+        Returns:
+            dist: Euclidean distance to the nearest surface/center.
+            push_vec: Vector pointing from the obstacle center/axis towards the point.
+        """
+        # Case: Infinite Cylinder (2D XY plane)
+        if int(o_type) == int(ObstacleType.CYLINDER_2D):
+            dist = float(np.linalg.norm(obst_c[:2] - pt[:2]))
+            # For cylinder, the push vector is purely in XY plane
+            push_vec = pt - obst_c
+            push_vec[2] = 0.0
+            return dist, push_vec
+
+        # Case: Finite Capsule (3D Segment)
+        if int(o_type) == int(ObstacleType.CAPSULE_3D):
+            vec_cp = pt - obst_c
+            proj = float(np.dot(vec_cp, o_vec))
+            proj_clamped = float(np.clip(proj, -o_len, o_len))
+            closest_pt = obst_c + proj_clamped * o_vec
+            
+            dist = float(np.linalg.norm(pt - closest_pt))
+            push_vec = pt - closest_pt
+            return dist, push_vec
+
+        # Fallback: Simple Sphere
+        dist = float(np.linalg.norm(obst_c - pt))
+        push_vec = pt - obst_c
+        return dist, push_vec
+
     def apply_obstacle_avoidance(
         self,
         base_waypoints: NDArray[np.floating],
@@ -244,87 +290,100 @@ class RacingPathPlanner:
         planned_duration: float,
     ) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
         """
-        Sample an initial spline and insert detour points.
-        Supports CYLINDER_2D and CAPSULE_3D.
+        Refines the trajectory by detecting collisions and inserting detour points.
+        Args:
+            base_waypoints: Initial geometric waypoints.
+            obstacles_pos: Array of obstacle centers.
+            safe_dist_list: Array of safety radii/margins.
+            types_list: Array of ObstacleType enums.
+            vecs_list: Array of orientation vectors (for capsules).
+            lens_list: Array of lengths (for capsules).
+            planned_duration: Total time for the trajectory.
+
+        Returns:
+            Tuple of (time_points, waypoint_coordinates).
         """
         pre_spline = self.spline_through_points(planned_duration, base_waypoints)
 
-        n_samples = int(self.ctrl_freq * planned_duration)
-        n_samples = max(n_samples, 2)
-
+        # Ensure minimum sampling density
+        n_samples = max(int(self.ctrl_freq * planned_duration), 2)
         t_axis = np.linspace(0.0, planned_duration, n_samples)
         wp_samples = pre_spline(t_axis)
 
+        # Iterate over every obstacle
         for obst_c, safe_dist, o_type, o_vec, o_len in zip(
             obstacles_pos, safe_dist_list, types_list, vecs_list, lens_list
         ):
             inside_region = False
             new_t = []
             new_pts = []
-
-            def dist_to_obstacle(pt: np.ndarray) -> float:
-                if int(o_type) == int(ObstacleType.CYLINDER_2D):
-                    return float(np.linalg.norm(obst_c[:2] - pt[:2]))
-                if int(o_type) == int(ObstacleType.CAPSULE_3D):
-                    vec_cp = pt - obst_c
-                    proj = float(np.dot(vec_cp, o_vec))
-                    proj_clamped = float(np.clip(proj, -o_len, o_len))
-                    closest_pt = obst_c + proj_clamped * o_vec
-                    return float(np.linalg.norm(pt - closest_pt))
-                return float(np.linalg.norm(obst_c - pt))
+            
+            # Temporary storage for entry/exit indices
+            idx_in = 0
 
             for idx in range(wp_samples.shape[0]):
                 pt = wp_samples[idx]
-                dist = dist_to_obstacle(pt)
+                
+                # Use helper to get geometry data
+                dist, push_vec = self._compute_obstacle_geometry(
+                    pt, obst_c, o_type, o_vec, o_len
+                )
 
+                # 1. Entering collision zone
                 if dist < safe_dist and not inside_region:
                     inside_region = True
                     idx_in = idx
 
+                # 2. Exiting collision zone -> Insert Detour
                 elif dist >= safe_dist and inside_region:
                     inside_region = False
                     idx_out = idx
 
+                    # Calculate Midpoint between entry and exit
                     p_in = wp_samples[idx_in]
                     p_out = wp_samples[idx_out]
                     p_mid = 0.5 * (p_in + p_out)
 
-                    if int(o_type) == int(ObstacleType.CYLINDER_2D):
-                        base_pt = obst_c.copy()
-                        push_vec = p_mid - obst_c
-                        push_vec[2] = 0.0
-                    elif int(o_type) == int(ObstacleType.CAPSULE_3D):
-                        vec_cp = p_mid - obst_c
-                        proj = float(np.clip(np.dot(vec_cp, o_vec), -o_len, o_len))
-                        base_pt = obst_c + proj * o_vec
-                        push_vec = p_mid - base_pt
-                    else:
-                        base_pt = obst_c.copy()
-                        push_vec = p_mid - obst_c
+                    # Re-calculate push vector based on the midpoint
+                    _, push_vec_mid = self._compute_obstacle_geometry(
+                        p_mid, obst_c, o_type, o_vec, o_len
+                    )
+                    
+                    push_dir = push_vec_mid / (np.linalg.norm(push_vec_mid) + 1e-9)
 
-                    push_dir = push_vec / (np.linalg.norm(push_vec) + 1e-9)
-
+                    # Determine detour point
                     if int(o_type) == int(ObstacleType.CYLINDER_2D):
-                        detour_xy = base_pt[:2] + push_dir[:2] * safe_dist
+                        # For cylinders, push out in XY, keep Z average
+                        detour_xy = obst_c[:2] + push_vec_mid[:2] + push_dir[:2] * safe_dist
+                        base_pt_xy = obst_c[:2] 
+                        detour_xy = base_pt_xy + push_dir[:2] * safe_dist
+                        
                         detour_z = 0.5 * (p_in[2] + p_out[2])
                         detour_pt = np.array([detour_xy[0], detour_xy[1], detour_z], dtype=float)
                     else:
+                        # For capsules/spheres, push out from the closest surface point
+                        base_pt = p_mid - push_vec_mid
                         detour_pt = (base_pt + push_dir * safe_dist).astype(float)
 
+                    # Insert the detour point at the average time
                     new_t.append(0.5 * (t_axis[idx_in] + t_axis[idx_out]))
                     new_pts.append(detour_pt)
 
+                # 3. Safe Zone -> Keep point
                 if dist >= safe_dist:
                     new_t.append(float(t_axis[idx]))
                     new_pts.append(pt)
 
+            # Handle edge case: Trajectory ends inside an obstacle
             if inside_region:
                 new_t.append(float(t_axis[-1]))
                 new_pts.append(wp_samples[-1])
 
+            # Update trajectory for the next obstacle iteration
             t_axis = np.asarray(new_t, dtype=float)
             wp_samples = np.asarray(new_pts, dtype=float)
 
+        # Remove duplicate time points (required for Spline)
         if t_axis.size > 0:
             _, uniq = np.unique(t_axis, return_index=True)
             return t_axis[uniq], wp_samples[uniq]
@@ -492,11 +551,20 @@ class MPCC(Controller):
     # --------------------------------------------------------------------------
     # Dynamics & Solver Setup (STRICTLY PRESERVED)
     # --------------------------------------------------------------------------
-
     def _export_dynamics_model(self) -> AcadosModel:
+        """
+        Defines the symbolic dynamics for the Acados OCP.
+        
+        Includes:
+        1. Nominal physical dynamics (drone physics).
+        2. Actuator dynamics (lag models).
+        3. Virtual path dynamics (progress variable theta).
+        """
         model_name = "lsy_mpcc_real_dyn_gateframe"
         params = self._dyn_params
 
+        # --- 1. Physical Dynamics  ---
+        # Returns symbolic expressions for X_dot = f(X, U)
         X_dot_phys, X_phys, U_phys, _ = symbolic_dynamics_euler(
             mass=params["mass"],
             gravity_vec=params["gravity_vec"],
@@ -509,46 +577,49 @@ class MPCC(Controller):
             cmd_rpy_coef=params["cmd_rpy_coef"],
             thrust_time_coef=params["thrust_time_coef"],
         )
-
         self.nx_phys = X_phys.shape[0]
 
-        # aliases for cost
+        # Alias states for cost function clarity
         self.px, self.py, self.pz = X_phys[0], X_phys[1], X_phys[2]
         self.roll, self.pitch, self.yaw = X_phys[3], X_phys[4], X_phys[5]
 
-        # command states
+        # --- 2. Symbolic Variable Definitions ---
+        
+        # Virtual States: Commanded values (integrators)
         self.r_cmd_state = MX.sym("r_cmd_state")
         self.p_cmd_state = MX.sym("p_cmd_state")
         self.y_cmd_state = MX.sym("y_cmd_state")
         self.f_cmd_state = MX.sym("f_cmd_state")
 
-        # actuator output states
+        # Virtual States: Actuator outputs (lag states)
         self.r_act = MX.sym("r_act")
         self.p_act = MX.sym("p_act")
         self.y_act = MX.sym("y_act")
         self.f_act = MX.sym("f_act")
 
-        # path progress
+        # Virtual States: Path progress
         self.theta = MX.sym("theta")
 
-        # inputs (rates)
+        # Inputs: Rates of change
         self.df_cmd = MX.sym("df_cmd")
         self.dr_cmd = MX.sym("dr_cmd")
         self.dp_cmd = MX.sym("dp_cmd")
         self.dy_cmd = MX.sym("dy_cmd")
         self.v_theta_cmd = MX.sym("v_theta_cmd")
 
+        # --- 3. State & Input Vector Assembly ---
         states = vertcat(
             X_phys,
             self.r_cmd_state, self.p_cmd_state, self.y_cmd_state, self.f_cmd_state,
             self.r_act, self.p_act, self.y_act, self.f_act,
             self.theta,
         )
+        
         inputs = vertcat(
             self.df_cmd, self.dr_cmd, self.dp_cmd, self.dy_cmd, self.v_theta_cmd,
         )
 
-        # indices
+        # Map indices for later constraints
         self.idx_r_cmd_state = int(self.nx_phys + 0)
         self.idx_p_cmd_state = int(self.nx_phys + 1)
         self.idx_y_cmd_state = int(self.nx_phys + 2)
@@ -560,24 +631,30 @@ class MPCC(Controller):
         self.idx_f_act = int(self.nx_phys + 7)
         self.idx_theta = int(self.nx_phys + 8)
 
-        # real dynamics take actuator outputs as physical inputs
+        # --- 4. Dynamics Equations ---
+
+        # 4a. Link Actuator States to Physical Inputs
+        # The physical model expects inputs U_phys. We substitute them 
+        # with our actuator lag states (U_phys_full).
         U_phys_full = vertcat(self.r_act, self.p_act, self.y_act, self.f_act)
         f_dyn_phys = substitute(X_dot_phys, U_phys, U_phys_full)
 
-        # command integrators
+        # 4b. Integrator Dynamics (Command = Integral of Rate)
         r_cmd_dot = self.dr_cmd
         p_cmd_dot = self.dp_cmd
         y_cmd_dot = self.dy_cmd
         f_cmd_dot = self.df_cmd
 
-        # actuator lag
+        # 4c. First-Order Actuator Lag Dynamics (Low-pass filter)
         r_act_dot = (self.r_cmd_state - self.r_act) / float(self.tau_rpy_act)
         p_act_dot = (self.p_cmd_state - self.p_act) / float(self.tau_rpy_act)
         y_act_dot = (self.y_cmd_state - self.y_act) / float(self.tau_yaw_act)
         f_act_dot = (self.f_cmd_state - self.f_act) / float(self.tau_f_act)
 
+        # 4d. Path Progress Dynamics
         theta_dot = self.v_theta_cmd
 
+        # Combine all dynamics
         f_dyn = vertcat(
             f_dyn_phys,
             r_cmd_dot, p_cmd_dot, y_cmd_dot, f_cmd_dot,
@@ -585,14 +662,16 @@ class MPCC(Controller):
             theta_dot,
         )
 
-        # trajectory params
+        # --- 5. Parameters (Spline & Weight Maps) ---
         n_samples = int(self.model_traj_length / self.model_arc_length)
         self.pd_list = MX.sym("pd_list", 3 * n_samples)
         self.tp_list = MX.sym("tp_list", 3 * n_samples)
         self.qc_gate = MX.sym("qc_gate", 1 * n_samples)
         self.qc_obst = MX.sym("qc_obst", 1 * n_samples)
+        
         params_sym = vertcat(self.pd_list, self.tp_list, self.qc_gate, self.qc_obst)
 
+        # Build Model Object
         model = AcadosModel()
         model.name = model_name
         model.f_expl_expr = f_dyn
@@ -616,10 +695,21 @@ class MPCC(Controller):
         return (1.0 - alpha) * p_low + alpha * p_high
 
     def _stage_cost_expression(self):
+        """
+        Constructs the CasADi expression for the MPC stage cost.
+        
+        Components:
+        1. Lag Error: Deviation along the path tangent (timing error).
+        2. Contour Error: Deviation perpendicular to the path (spatial error).
+        3. Input Regularization: Penalties on control rates (smoothness).
+        4. Progress Maximization: Reward for advancing theta (velocity).
+        """
+        # Current States
         position_vec = vertcat(self.px, self.py, self.pz)
         att_vec = vertcat(self.roll, self.pitch, self.yaw)
         ctrl_vec = vertcat(self.df_cmd, self.dr_cmd, self.dp_cmd, self.dy_cmd)
 
+        # Interpolate Trajectory Parameters based on current 'theta'
         theta_grid = np.arange(0.0, self.model_traj_length, self.model_arc_length)
 
         pd_theta = self._piecewise_linear_interp(self.theta, theta_grid, self.pd_list)
@@ -627,20 +717,41 @@ class MPCC(Controller):
         qc_gate_theta = self._piecewise_linear_interp(self.theta, theta_grid, self.qc_gate, dim=1)
         qc_obst_theta = self._piecewise_linear_interp(self.theta, theta_grid, self.qc_obst, dim=1)
 
+        # --- 1. Error Vector Decomposition ---
         tp_unit = tp_theta / (norm_2(tp_theta) + 1e-6)
         e_theta = position_vec - pd_theta
         e_lag = dot(tp_unit, e_theta) * tp_unit
         e_contour = e_theta - e_lag
 
+        # --- 2. Adaptive Weights ---
+        # Increase weights near gates (q_l_gate_peak) or obstacles (q_l_obst_peak)
+        Q_lag_adaptive = (
+            self.q_l 
+            + self.q_l_gate_peak * qc_gate_theta 
+            + self.q_l_obst_peak * qc_obst_theta
+        )
+        
+        Q_contour_adaptive = (
+            self.q_c 
+            + self.q_c_gate_peak * qc_gate_theta 
+            + self.q_c_obst_peak * qc_obst_theta
+        )
+
+        # --- 3. Cost Components ---
+        
+        # Tracking Cost (Lag + Contour + Attitude Regularization)
         track_cost = (
-            (self.q_l + self.q_l_gate_peak * qc_gate_theta + self.q_l_obst_peak * qc_obst_theta) * dot(e_lag, e_lag)
-            + (self.q_c + self.q_c_gate_peak * qc_gate_theta + self.q_c_obst_peak * qc_obst_theta)
-            * dot(e_contour, e_contour)
+            Q_lag_adaptive * dot(e_lag, e_lag)
+            + Q_contour_adaptive * dot(e_contour, e_contour)
             + att_vec.T @ self.Q_w @ att_vec
         )
 
+        # Smoothness Cost (Input Rates)
         smooth_cost = ctrl_vec.T @ self.R_df @ ctrl_vec
 
+        # Progress Cost (Maximize Velocity along Path)
+        # Note: We penalize -v_theta to maximize it.
+        # We reduce the 'reward' (increase penalty) near complex regions to slow down.
         speed_cost = (
             -self.miu * self.v_theta_cmd
             + self.w_v_gate * qc_gate_theta * (self.v_theta_cmd**2)
@@ -662,7 +773,7 @@ class MPCC(Controller):
 
         ocp.cost.cost_type = "EXTERNAL"
 
-        # Weights (Strictly Preserved)
+        # Weights
         self.q_l = 200
         self.q_c = 100
         self.Q_w = 1 * DM(np.eye(3))

@@ -6,7 +6,7 @@ import sys
 import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from scripts.sim_4_tune import simulate 
+from lsy_drone_racing.scripts.sim_cal_tune import simulate 
 from ax.service.ax_client import AxClient, ObjectiveProperties
 import numpy as np
 
