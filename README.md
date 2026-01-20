@@ -29,7 +29,7 @@ Whether you’re new to drones or an experienced developer, this project provide
 
 ## Running Instruction
 
-For challenge setup level2, use controller mpcc_rotor_level2_final.py, this is the version after Auto-tuning. It balances the track time and robustness.
+For challenge setup level2, use controller mpcc_rotor_level3.py or mpcc_rotor_level2_final.py, first controller is more robust and second controller the version after Auto-tuning. It balances the track time and robustness.
 
 For challenge setup level3, use controller mpcc_rotor_level3.py. It achived track time of 6.1 seconds in real-time deployment.
 
