@@ -5,12 +5,12 @@ from typing import TYPE_CHECKING, Tuple
 import numpy as np
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from casadi import DM, MX, dot, floor, if_else, norm_2, substitute, vertcat
-from scipy.interpolate import CubicSpline
-from scipy.spatial.transform import Rotation as R
-
 from drone_models.core import load_params
 from drone_models.so_rpy_rotor import symbolic_dynamics_euler
 from drone_models.utils.rotation import ang_vel2rpy_rates
+from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation as R
+
 from lsy_drone_racing.control import Controller
 
 if TYPE_CHECKING:
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 # Helper Class
 class FrameUtils:
     """extraction coordinate frame  from quaternions."""
+
     @staticmethod
     def quat_to_axis(quat: NDArray[np.floating], axis_index: int = 1) -> NDArray[np.floating]:
         """Extract a specific column from the rotation matrix derived from quaternion."""
@@ -32,7 +33,9 @@ class FrameUtils:
         return None
 
     @staticmethod
-    def extract_gate_frames(gates_quaternions: NDArray[np.floating]) -> Tuple[NDArray, NDArray, NDArray]:
+    def extract_gate_frames(
+        gates_quaternions: NDArray[np.floating],
+    ) -> Tuple[NDArray, NDArray, NDArray]:
         """Extract Normal(x), Y-axis, Z-axis from gate quaternions."""
         normals = FrameUtils.quat_to_axis(gates_quaternions, axis_index=0)
         y_axes = FrameUtils.quat_to_axis(gates_quaternions, axis_index=1)
@@ -42,12 +45,14 @@ class FrameUtils:
 
 #  Path Planner Class
 class RacingPathPlanner:
-    """
-    Handles all trajectory generation, spline fitting, re-parameterization,
-    and obstacle/gate detours.
-    """
+    """Handles all trajectory generation, spline fitting, re-parameterization, and obstacle/gate detours."""
 
     def __init__(self, ctrl_freq: float):
+        """Initialize the RacingPathPlanner with control frequency.
+        
+        Args:
+            ctrl_freq: Control frequency in Hz.
+        """
         self.ctrl_freq = ctrl_freq
 
     def build_gate_waypoints(
@@ -63,11 +68,17 @@ class RacingPathPlanner:
         grid = []
         for idx in range(samples_per_gate):
             alpha = idx / (samples_per_gate - 1) if samples_per_gate > 1 else 0.0
-            grid.append(gates_positions - half_span * gates_normals + 2.0 * half_span * alpha * gates_normals)
+            grid.append(
+                gates_positions
+                - half_span * gates_normals
+                + 2.0 * half_span * alpha * gates_normals
+            )
         stacked = np.stack(grid, axis=1).reshape(n_gates, samples_per_gate, 3).reshape(-1, 3)
         return np.vstack([start_pos[None, :], stacked])
 
-    def spline_through_points(self, duration: float, waypoints: NDArray[np.floating]) -> CubicSpline:
+    def spline_through_points(
+        self, duration: float, waypoints: NDArray[np.floating]
+    ) -> CubicSpline:
         """Fit a time-parameterized CubicSpline through waypoints."""
         diffs = np.diff(waypoints, axis=0)
         segment_lengths = np.linalg.norm(diffs, axis=1)
@@ -78,9 +89,7 @@ class RacingPathPlanner:
     def reparametrize_by_arclength(
         self, trajectory: CubicSpline, arc_step: float = 0.05, epsilon: float = 1e-5
     ) -> CubicSpline:
-        """
-        Reparameterize spline by arc length.
-        """
+        """Reparameterize spline by arc length."""
         total_param_range = trajectory.x[-1] - trajectory.x[0]
 
         for _ in range(99):
@@ -97,7 +106,9 @@ class RacingPathPlanner:
 
         return CubicSpline(cum_arc, pts)
 
-    def extend_spline_tail(self, trajectory: CubicSpline, extend_length: float = 1.0) -> CubicSpline:
+    def extend_spline_tail(
+        self, trajectory: CubicSpline, extend_length: float = 1.0
+    ) -> CubicSpline:
         """Extend the end of the spline linearly."""
         base_knots = trajectory.x
         base_dt = min(base_knots[1] - base_knots[0], 0.2)
@@ -105,14 +116,8 @@ class RacingPathPlanner:
         v_end = trajectory.derivative(1)(base_knots[-1])
         v_dir = v_end / (np.linalg.norm(v_end) + 1e-6)
 
-        extra_knots = np.arange(
-            base_knots[-1] + base_dt,
-            base_knots[-1] + extend_length,
-            base_dt,
-        )
-        p_extend = np.array(
-            [p_end + v_dir * (s - base_knots[-1]) for s in extra_knots]
-        )
+        extra_knots = np.arange(base_knots[-1] + base_dt, base_knots[-1] + extend_length, base_dt)
+        p_extend = np.array([p_end + v_dir * (s - base_knots[-1]) for s in extra_knots])
 
         theta_new = np.concatenate([base_knots, extra_knots])
         p_new = np.vstack([trajectory(base_knots), p_extend])
@@ -129,9 +134,7 @@ class RacingPathPlanner:
         angle_threshold: float = 120.0,
         detour_distance: float = 0.65,
     ) -> NDArray[np.floating]:
-        """
-        Inserts detour waypoints to ensure proper gate entry angles.
-        """
+        """Inserts detour waypoints to ensure proper gate entry angles."""
         n_gates = gate_positions.shape[0]
         wp_list = list(waypoints)
         extra_inserted = 0
@@ -147,7 +150,8 @@ class RacingPathPlanner:
             p_next = wp_list[first_idx_next_gate]
             delta_vec = p_next - p_curr
             delta_norm = np.linalg.norm(delta_vec)
-            if delta_norm < 1e-6: continue
+            if delta_norm < 1e-6:
+                continue
 
             normal_i = gate_normals[gate_idx]
             cos_ang = np.dot(delta_vec, normal_i) / delta_norm
@@ -178,7 +182,6 @@ class RacingPathPlanner:
                         detour_dir = -y_axis
 
                 detour_wp = gate_center + detour_distance * detour_dir
-                # [FIX] Insert at the correct index relative to current list expansion
                 insert_idx = last_idx_curr_gate + 1
                 wp_list.insert(insert_idx, detour_wp)
                 extra_inserted += 1
@@ -189,12 +192,9 @@ class RacingPathPlanner:
         self,
         trajectory_points: NDArray[np.floating],
         obstacle_pos: NDArray[np.floating],
-        safe_dist: float
+        safe_dist: float,
     ) -> Tuple[int, int, bool]:
-        """
-        Identifies the start and end indices of the trajectory segment that violates 
-        the safety distance.
-        """
+        """Identifies the start and end indices of the trajectory segment that violatesthe safety distance."""
         d_xy = np.linalg.norm(trajectory_points[:, :2] - obstacle_pos[:2], axis=1)
         inside_mask = d_xy < safe_dist
 
@@ -208,7 +208,7 @@ class RacingPathPlanner:
         # Check if the segment is valid (has length)
         if end_idx <= start_idx + 1:
             return -1, -1, False
-            
+
         return start_idx, end_idx, True
 
     def _generate_arc_detour(
@@ -217,15 +217,13 @@ class RacingPathPlanner:
         p_end: NDArray[np.floating],
         center: NDArray[np.floating],
         radius: float,
-        n_points: int
+        n_points: int,
     ) -> NDArray[np.floating]:
-        """
-        Generates a 3D arc of points around a center between start and end points.
-        """
+        """Generates a 3D arc of points around a center between start and end points."""
         # 1. Calculate vectors from center to start/end
         v_start = p_start[:2] - center[:2]
         v_end = p_end[:2] - center[:2]
-        
+
         # Normalize
         nrm_s = np.linalg.norm(v_start) + 1e-9
         nrm_e = np.linalg.norm(v_end) + 1e-9
@@ -246,12 +244,12 @@ class RacingPathPlanner:
         # 4. Generate points
         theta_list = np.linspace(theta_start, theta_start + d_theta, n_points + 2)[1:-1]
         detour_points = []
-        
+
         for i, th in enumerate(theta_list):
             # Interpolate Z (height) linearly
             alpha = (i + 1) / (n_points + 1)
             z = (1.0 - alpha) * p_start[2] + alpha * p_end[2]
-            
+
             # XY position on circle
             p_x = center[0] + radius * np.cos(th)
             p_y = center[1] + radius * np.sin(th)
@@ -268,23 +266,22 @@ class RacingPathPlanner:
         safe_dist: float,
         arc_n: int = 5,
     ) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """
-        Injects circular detours around obstacles where the path violates safety margins.
-        """
+        """Injects circular detours around obstacles where the path violates safety margins."""
         # 1. Initial Sampling
         pre_spline = self.spline_through_points(planned_duration, base_waypoints)
         n_samples = max(int(self.ctrl_freq * planned_duration), 2)
-        
+
         t_axis = np.linspace(0.0, planned_duration, n_samples)
         wp_samples = pre_spline(t_axis)
 
-        gate_margin = 3 # indices margin to avoid modifying path inside a gate
+        gate_margin = 3  # indices margin to avoid modifying path inside a gate
 
         # 2. Iterate over obstacles
         for obst in obstacles_pos:
-            
             # Check collision
-            start_idx, end_idx, collision = self._find_collision_indices(wp_samples, obst, safe_dist)
+            start_idx, end_idx, collision = self._find_collision_indices(
+                wp_samples, obst, safe_dist
+            )
             if not collision:
                 continue
 
@@ -293,30 +290,35 @@ class RacingPathPlanner:
             is_near_gate = False
             if len(gate_positions) > 0:
                 # Find indices of points closest to gates
-                gate_indices = [np.argmin(np.linalg.norm(wp_samples - g, axis=1)) for g in gate_positions]
+                gate_indices = [
+                    np.argmin(np.linalg.norm(wp_samples - g, axis=1)) for g in gate_positions
+                ]
                 gate_indices = np.array(gate_indices)
-                
+
                 # Check overlap
-                if np.any((gate_indices >= start_idx - gate_margin) & (gate_indices <= end_idx + gate_margin)):
+                if np.any(
+                    (gate_indices >= start_idx - gate_margin)
+                    & (gate_indices <= end_idx + gate_margin)
+                ):
                     is_near_gate = True
-            
+
             if is_near_gate:
                 continue
 
             # 3. Generate Detour
             p_start = wp_samples[start_idx]
             p_end = wp_samples[end_idx]
-            
+
             t_start = t_axis[start_idx]
             t_end = t_axis[end_idx]
             t_detour = np.linspace(t_start, t_end, arc_n + 2)[1:-1]
-            
+
             detour_pts = self._generate_arc_detour(p_start, p_end, obst, safe_dist, arc_n)
 
             # 4. Splice Arrays
             # Construct new lists: [Head] + [Detour] + [Tail]
-            new_t = np.concatenate([t_axis[:start_idx+1], t_detour, t_axis[end_idx:]])
-            new_wp = np.concatenate([wp_samples[:start_idx+1], detour_pts, wp_samples[end_idx:]])
+            new_t = np.concatenate([t_axis[: start_idx + 1], t_detour, t_axis[end_idx:]])
+            new_wp = np.concatenate([wp_samples[: start_idx + 1], detour_pts, wp_samples[end_idx:]])
 
             t_axis = new_t
             wp_samples = new_wp
@@ -335,30 +337,22 @@ class RacingPathPlanner:
         return t_axis, wp_samples
 
     def build_complete_trajectory(
-        self,
-        start_pos: NDArray[np.floating],
-        obs: dict,
-        planned_duration: float
+        self, start_pos: NDArray[np.floating], obs: dict, planned_duration: float
     ) -> Tuple[CubicSpline, float]:
-        """
-        Orchestrates the full path generation process:
-        Gate WPs -> Gate Detours -> Obstacle Detours -> Spline.
-        """
+        """Orchestrates the full path generation process:Gate WPs -> Gate Detours -> Obstacle Detours -> Spline."""
         gate_positions = obs["gates_pos"]
         obstacle_positions = obs["obstacles_pos"]
         gate_quats = obs["gates_quat"]
 
         gate_normals, gate_y, gate_z = FrameUtils.extract_gate_frames(gate_quats)
 
-        base_waypoints = self.build_gate_waypoints(
-            start_pos, gate_positions, gate_normals
-        )
+        base_waypoints = self.build_gate_waypoints(start_pos, gate_positions, gate_normals)
 
         if base_waypoints.shape[0] > 1:
             base_waypoints[1:, 2] += 0.0
 
         with_gate_detours = self.insert_gate_detours(
-            base_waypoints, gate_positions, gate_normals, gate_y, gate_z,
+            base_waypoints, gate_positions, gate_normals, gate_y, gate_z
         )
 
         t_axis, collision_free_wps = self.inject_obstacle_detours(
@@ -370,19 +364,22 @@ class RacingPathPlanner:
             trajectory = self.spline_through_points(planned_duration, with_gate_detours)
         else:
             trajectory = CubicSpline(t_axis, collision_free_wps)
-        
-        return trajectory, float(trajectory.x[-1])
 
+        return trajectory, float(trajectory.x[-1])
 
 
 # MPCC Controller Class
 class MPCC(Controller):
-    """
-    Model Predictive Contouring Control for drone racing.
-    Logic strictly mirrors mpcc_rotor.py.
-    """
+    """Model Predictive Contouring Control for drone racing."""
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
+        """Initialize the MPCC controller with observation, info, and configuration.
+        
+        Args:
+            obs: Observation dictionary containing drone state and environment information.
+            info: Information dictionary.
+            config: Configuration object with environment and simulation parameters.
+        """
         super().__init__(obs, info, config)
 
         self._ctrl_freq = config.env.freq
@@ -394,7 +391,7 @@ class MPCC(Controller):
         mass_val = float(self._dyn_params["mass"])
         gravity_mag = -float(self._dyn_params["gravity_vec"][-1])
         self.hover_thrust = mass_val * gravity_mag
-        
+
         # Actuator lag constants
         self.tau_rpy_act = 0.05
         self.tau_yaw_act = 0.08
@@ -410,13 +407,13 @@ class MPCC(Controller):
         self._cached_gate_centers = obs["gates_pos"]
         self._cached_obstacles = obs["obstacles_pos"]
         self._planned_duration = 30.0
-        
+
         self.planner = RacingPathPlanner(ctrl_freq=self._ctrl_freq)
 
         # Build initial path (Logic: Gate mode uses initial_pos)
         self._rebuild_nominal_path_gate(obs)
 
-        # MPC Configuration 
+        # MPC Configuration
         self.N = 35
         self.T_HORIZON = 0.7
         self.dt = self.T_HORIZON / self.N
@@ -434,11 +431,7 @@ class MPCC(Controller):
         )
 
         # Safety Bounds
-        self.pos_bound = [
-            np.array([-2.6, 2.6]),
-            np.array([-2.0, 1.8]),
-            np.array([-0.1, 2.0]),
-        ]
+        self.pos_bound = [np.array([-2.6, 2.6]), np.array([-2.0, 1.8]), np.array([-0.1, 2.0])]
         self.velocity_bound = [-1.0, 4.0]
 
         self.last_theta = 0.0
@@ -475,18 +468,18 @@ class MPCC(Controller):
         # State Mapping
         self.px, self.py, self.pz = X_phys[0], X_phys[1], X_phys[2]
         self.roll, self.pitch, self.yaw = X_phys[3], X_phys[4], X_phys[5]
-        
+
         # Symbolic States
         self.r_cmd_state = MX.sym("r_cmd_state")
         self.p_cmd_state = MX.sym("p_cmd_state")
         self.y_cmd_state = MX.sym("y_cmd_state")
         self.f_cmd_state = MX.sym("f_cmd_state")
-        
+
         self.r_act = MX.sym("r_act")
         self.p_act = MX.sym("p_act")
         self.y_act = MX.sym("y_act")
         self.f_act = MX.sym("f_act")
-        
+
         self.theta = MX.sym("theta")
 
         # Control Inputs
@@ -499,13 +492,17 @@ class MPCC(Controller):
         # Vectors
         states = vertcat(
             X_phys,
-            self.r_cmd_state, self.p_cmd_state, self.y_cmd_state, self.f_cmd_state,
-            self.r_act, self.p_act, self.y_act, self.f_act,
+            self.r_cmd_state,
+            self.p_cmd_state,
+            self.y_cmd_state,
+            self.f_cmd_state,
+            self.r_act,
+            self.p_act,
+            self.y_act,
+            self.f_act,
             self.theta,
         )
-        inputs = vertcat(
-            self.df_cmd, self.dr_cmd, self.dp_cmd, self.dy_cmd, self.v_theta_cmd,
-        )
+        inputs = vertcat(self.df_cmd, self.dr_cmd, self.dp_cmd, self.dy_cmd, self.v_theta_cmd)
 
         # Indices
         self.idx_r_cmd_state = int(self.nx_phys + 0)
@@ -529,12 +526,15 @@ class MPCC(Controller):
 
         f_dyn = vertcat(
             f_dyn_phys,
-            self.dr_cmd, self.dp_cmd, self.dy_cmd, self.df_cmd,  # Command states integration
+            self.dr_cmd,
+            self.dp_cmd,
+            self.dy_cmd,
+            self.df_cmd,  # Command states integration
             (self.r_cmd_state - self.r_act) / tau_rpy,
             (self.p_cmd_state - self.p_act) / tau_rpy,
             (self.y_cmd_state - self.y_act) / tau_yaw,
             (self.f_cmd_state - self.f_act) / tau_f,
-            self.v_theta_cmd  # Theta integration
+            self.v_theta_cmd,  # Theta integration
         )
 
         # Cost parameters
@@ -552,7 +552,7 @@ class MPCC(Controller):
         model.p = vertcat(self.pd_list, self.tp_list, self.qc_gate, self.qc_obst)
         return model
 
-    def _piecewise_linear_interp(self, theta, theta_vec, flattened_points, dim: int = 3):
+    def _piecewise_linear_interp(self, theta: MX, theta_vec: NDArray[np.floating], flattened_points: MX, dim: int = 3) -> MX:
         """CasADi symbolic linear interpolation."""
         M = len(theta_vec)
         idx_float = (theta - theta_vec[0]) / (theta_vec[-1] - theta_vec[0]) * (M - 1)
@@ -569,7 +569,7 @@ class MPCC(Controller):
 
         return (1.0 - alpha) * p_low + alpha * p_high
 
-    def _stage_cost_expression(self):
+    def _stage_cost_expression(self) -> MX:
         """Constructs the symbolic cost function."""
         pos_vec = vertcat(self.px, self.py, self.pz)
         att_vec = vertcat(self.roll, self.pitch, self.yaw)
@@ -589,9 +589,13 @@ class MPCC(Controller):
         e_contour = e_theta - e_lag
 
         # Weights
-        q_l_term = (self.q_l + self.q_l_gate_peak * qc_gate_theta + self.q_l_obst_peak * qc_obst_theta)
-        q_c_term = (self.q_c + self.q_c_gate_peak * qc_gate_theta + self.q_c_obst_peak * qc_obst_theta)
-        
+        q_l_term = (
+            self.q_l + self.q_l_gate_peak * qc_gate_theta + self.q_l_obst_peak * qc_obst_theta
+        )
+        q_c_term = (
+            self.q_c + self.q_c_gate_peak * qc_gate_theta + self.q_c_obst_peak * qc_obst_theta
+        )
+
         track_cost = (
             q_l_term * dot(e_lag, e_lag)
             + q_c_term * dot(e_contour, e_contour)
@@ -599,9 +603,9 @@ class MPCC(Controller):
         )
         smooth_cost = ctrl_vec.T @ self.R_df @ ctrl_vec
         speed_cost = (
-            - self.miu * self.v_theta_cmd
-            + self.w_v_gate * qc_gate_theta * (self.v_theta_cmd ** 2)
-            + self.w_v_obst * qc_obst_theta * (self.v_theta_cmd ** 2)
+            -self.miu * self.v_theta_cmd
+            + self.w_v_gate * qc_gate_theta * (self.v_theta_cmd**2)
+            + self.w_v_obst * qc_obst_theta * (self.v_theta_cmd**2)
         )
 
         return track_cost + smooth_cost + speed_cost
@@ -625,14 +629,14 @@ class MPCC(Controller):
         self.Q_w = 1 * DM(np.eye(3))
 
         self.q_l_gate_peak = 520.2687042765319
-        self.q_c_gate_peak = 764.3037075176835#820
+        self.q_c_gate_peak = 764.3037075176835  # 820
 
         self.q_l_obst_peak = 207.83845749683678
-        self.q_c_obst_peak = 110.51885732449591 #130
+        self.q_c_obst_peak = 110.51885732449591  # 130
 
         self.R_df = DM(np.diag([0.1, 0.5, 0.5, 0.5]))
 
-        self.miu = 14.3377785384655 #13.8
+        self.miu = 14.3377785384655  # 13.8
         self.w_v_gate = 2.7327203765511516
         self.w_v_obst = 2.460291111562401
 
@@ -647,15 +651,31 @@ class MPCC(Controller):
         idx_y = self.idx_y_cmd_state
         idx_f_cmd = self.idx_f_cmd_state
         idx_f_act = self.idx_f_act
-        
+
         ocp.constraints.lbx = np.array([thrust_min, thrust_min, -1.57, -1.57, -1.57])
         ocp.constraints.ubx = np.array([thrust_max, thrust_max, 1.57, 1.57, 1.57])
         ocp.constraints.idxbx = np.array([idx_f_act, idx_f_cmd, idx_r, idx_p, idx_y])
 
-        ocp.constraints.lbu = np.array([-self.rate_limit_df, -self.rate_limit_drpy, -self.rate_limit_drpy, -self.rate_limit_drpy, 0.0])
-        ocp.constraints.ubu = np.array([self.rate_limit_df, self.rate_limit_drpy, self.rate_limit_drpy, self.rate_limit_drpy, self.rate_limit_v_theta])
+        ocp.constraints.lbu = np.array(
+            [
+                -self.rate_limit_df,
+                -self.rate_limit_drpy,
+                -self.rate_limit_drpy,
+                -self.rate_limit_drpy,
+                0.0,
+            ]
+        )
+        ocp.constraints.ubu = np.array(
+            [
+                self.rate_limit_df,
+                self.rate_limit_drpy,
+                self.rate_limit_drpy,
+                self.rate_limit_drpy,
+                self.rate_limit_v_theta,
+            ]
+        )
         ocp.constraints.idxbu = np.array([0, 1, 2, 3, 4])
-        
+
         # Initial Parameters
         ocp.constraints.x0 = np.zeros(self.nx)
         param_vec = self._encode_traj_params(self.arc_trajectory)
@@ -697,9 +717,7 @@ class MPCC(Controller):
                 d_obs_xy = np.linalg.norm(pd_vals[:, :2] - obst_center[:2], axis=-1)
                 qc_obst = np.maximum(qc_obst, 0.7 * np.exp(-1.0 * d_obs_xy**2))
 
-        return np.concatenate([
-            pd_vals.reshape(-1), tp_vals.reshape(-1), qc_gate, qc_obst,
-        ])
+        return np.concatenate([pd_vals.reshape(-1), tp_vals.reshape(-1), qc_gate, qc_obst])
 
     def _rebuild_nominal_path_gate(self, obs: dict[str, NDArray[np.floating]]):
         """Replanning triggered by Gate: Uses INITIAL position (Global Consistency)."""
@@ -707,28 +725,28 @@ class MPCC(Controller):
         # Update Cache
         self._cached_gate_centers = obs["gates_pos"]
         self._cached_obstacles = obs["obstacles_pos"]
-        
+
         # build full trajectory
         self.trajectory, duration = self.planner.build_complete_trajectory(
             self._initial_pos,  # Strict: Use Initial Pos
             obs=obs,
-            planned_duration=self._planned_duration
+            planned_duration=self._planned_duration,
         )
         self._planned_duration = duration
 
     def _rebuild_nominal_path_obstacle(self, obs: dict[str, NDArray[np.floating]]):
         """Replanning triggered by obstacles: Uses INITIAL position (Global Consistency)."""
-        
-        print(f"T={self._step_count / self._ctrl_freq:.2f}: (Re)building nominal path (obstacle -> FORCE GLOBAL)...")
+        print(
+            f"T={self._step_count / self._ctrl_freq:.2f}: (Re)building nominal path (obstacle -> FORCE GLOBAL)..."
+        )
         self._cached_gate_centers = obs["gates_pos"]
         self._cached_obstacles = obs["obstacles_pos"]
 
         self.trajectory, duration = self.planner.build_complete_trajectory(
-            self._initial_pos,  
-            obs=obs,
-            planned_duration=self._planned_duration
+            self._initial_pos, obs=obs, planned_duration=self._planned_duration
         )
         self._planned_duration = duration
+
     # --------------------------------------------------------------------------
     # Detection & Control Loop
     # --------------------------------------------------------------------------
@@ -750,7 +768,7 @@ class MPCC(Controller):
 
     def _detect_event_change_obstacle(self, obs: dict[str, NDArray[np.bool_]]) -> bool:
         if not hasattr(self, "_last_obst_flags"):
-            return False 
+            return False
 
         curr_obst = np.array(obs.get("obstacles_visited", []), dtype=bool)
         if curr_obst.shape != self._last_obst_flags.shape:
@@ -764,18 +782,22 @@ class MPCC(Controller):
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
-
+        """Compute the control command for the drone based on the current observation and optional info."""
         self._current_obs_pos = obs["pos"]
         replanned = False
 
         # Event Detection & Replanning(get actual gates or obstacles position)
         if self._detect_event_change_gate(obs):
-            print(f"T={self._step_count / self._ctrl_freq:.2f}: MPCC detected gate/env change, replanning...")
+            print(
+                f"T={self._step_count / self._ctrl_freq:.2f}: MPCC detected gate/env change, replanning..."
+            )
             self._rebuild_nominal_path_gate(obs)
             replanned = True
-            
+
         elif self._detect_event_change_obstacle(obs):
-            print(f"T={self._step_count / self._ctrl_freq:.2f}: MPCC detected obstacle/env change, replanning...")
+            print(
+                f"T={self._step_count / self._ctrl_freq:.2f}: MPCC detected obstacle/env change, replanning..."
+            )
             self._rebuild_nominal_path_obstacle(obs)
             replanned = True
 
@@ -783,7 +805,9 @@ class MPCC(Controller):
         if replanned:
             # re-generate Spline
             self.arc_trajectory = self.planner.reparametrize_by_arclength(
-                self.planner.extend_spline_tail(self.trajectory, extend_length=self.model_traj_length)
+                self.planner.extend_spline_tail(
+                    self.trajectory, extend_length=self.model_traj_length
+                )
             )
             # recalculate (pd, tp, qc_gate, qc_obst)
             param_vec = self._encode_traj_params(self.arc_trajectory)
@@ -795,7 +819,7 @@ class MPCC(Controller):
         # ----------------------------------------------------------------------
         quat = obs["quat"]
         rpy = R.from_quat(quat).as_euler("xyz", degrees=False)
-        
+
         # Euler Rates
         if "ang_vel" in obs:
             drpy = ang_vel2rpy_rates(quat, obs["ang_vel"])
@@ -812,28 +836,27 @@ class MPCC(Controller):
 
         # [X_phys, r_cmd, p_cmd, y_cmd, f_cmd, r_act, p_act, y_act, f_act, theta]
         x_now = np.zeros(self.nx, dtype=float)
-        x_now[0:self.nx_phys] = X_phys_now_full
-        
+        x_now[0 : self.nx_phys] = X_phys_now_full
+
         # command states(last command)
         x_now[self.idx_r_cmd_state] = self.last_rpy_cmd[0]
         x_now[self.idx_p_cmd_state] = self.last_rpy_cmd[1]
         x_now[self.idx_y_cmd_state] = self.last_rpy_cmd[2]
         x_now[self.idx_f_cmd_state] = self.last_f_cmd
-        
+
         #  (last input)
         x_now[self.idx_r_act] = self.last_rpy_act[0]
         x_now[self.idx_p_act] = self.last_rpy_act[1]
         x_now[self.idx_y_act] = self.last_rpy_act[2]
         x_now[self.idx_f_act] = self.last_f_act
-        
-    
+
         x_now[self.idx_theta] = self.last_theta
 
         # ----------------------------------------------------------------------
         # Solver Setup
         # ----------------------------------------------------------------------
-        
-        # Warm Start 
+
+        # Warm Start
         if not hasattr(self, "_x_warm"):
             self._x_warm = [x_now.copy() for _ in range(self.N + 1)]
             self._u_warm = [np.zeros(self.nu) for _ in range(self.N)]
@@ -856,19 +879,18 @@ class MPCC(Controller):
         if self.last_theta >= float(self.arc_trajectory.x[-1]):
             self.finished = True
             print("[MPCC] Stop: finished path.")
-        
+
         if self._pos_outside_limits(obs["pos"]):
             self.finished = True
             print("[MPCC] Stop: position out of safe bounds.")
-            
+
         if self._speed_outside_limits(obs["vel"]):
             self.finished = True
             print("[MPCC] Stop: velocity out of safe range.")
 
-    
         # Solve & Output
         status = self.acados_ocp_solver.solve()
-        
+
         if status != 0:
             print("[MPCC] acados solver returned non-zero status:", status)
             # return np.array([0, 0, 0, self.hover_thrust])
@@ -878,55 +900,65 @@ class MPCC(Controller):
 
         x_next = self.acados_ocp_solver.get(1, "x")
 
-        self.last_rpy_cmd = np.array([
-            x_next[self.idx_r_cmd_state], 
-            x_next[self.idx_p_cmd_state], 
-            x_next[self.idx_y_cmd_state]
-        ])
+        self.last_rpy_cmd = np.array(
+            [
+                x_next[self.idx_r_cmd_state],
+                x_next[self.idx_p_cmd_state],
+                x_next[self.idx_y_cmd_state],
+            ]
+        )
         self.last_f_cmd = float(x_next[self.idx_f_cmd_state])
-        
-        self.last_rpy_act = np.array([
-            x_next[self.idx_r_act], 
-            x_next[self.idx_p_act], 
-            x_next[self.idx_y_act]
-        ])
+
+        self.last_rpy_act = np.array(
+            [x_next[self.idx_r_act], x_next[self.idx_p_act], x_next[self.idx_y_act]]
+        )
         self.last_f_act = float(x_next[self.idx_f_act])
         self.last_f_collective = self.last_f_act
         self.last_theta = float(x_next[self.idx_theta])
 
         # command [roll, pitch, yaw, thrust]
-        cmd = np.array([
-            self.last_rpy_cmd[0], 
-            self.last_rpy_cmd[1], 
-            self.last_rpy_cmd[2], 
-            self.last_f_cmd
-        ], dtype=float)
+        cmd = np.array(
+            [self.last_rpy_cmd[0], self.last_rpy_cmd[1], self.last_rpy_cmd[2], self.last_f_cmd],
+            dtype=float,
+        )
 
         self._step_count += 1
         return cmd
 
     def _pos_outside_limits(self, pos: NDArray[np.floating]) -> bool:
-        if self.pos_bound is None: return False
+        if self.pos_bound is None:
+            return False
         for i_dim in range(3):
             low, high = self.pos_bound[i_dim]
-            if pos[i_dim] < low or pos[i_dim] > high: return True
+            if pos[i_dim] < low or pos[i_dim] > high:
+                return True
         return False
 
     def _speed_outside_limits(self, vel: NDArray[np.floating]) -> bool:
-        if self.velocity_bound is None: return False
+        if self.velocity_bound is None:
+            return False
         speed = np.linalg.norm(vel)
         return not (self.velocity_bound[0] < speed < self.velocity_bound[1])
 
     # Callbacks & Debug
-    def step_callback(self, *args, **kwargs) -> bool:
+    def step_callback(self, *args: object, **kwargs: object) -> bool:
+        """Callback to indicate whether the controller has finished its trajectory. True if the controller has finished, False otherwise."""
         return self.finished
 
     def episode_callback(self):
+        """Reset the controller state at the beginning of a new episode."""
         print("[MPCC] Episode reset.")
         self._step_count = 0
         self.finished = False
-        for attr in ["_last_gate_flags", "_last_obst_flags", "_x_warm", "_u_warm", "_current_obs_pos"]:
-            if hasattr(self, attr): delattr(self, attr)
+        for attr in [
+            "_last_gate_flags",
+            "_last_obst_flags",
+            "_x_warm",
+            "_u_warm",
+            "_current_obs_pos",
+        ]:
+            if hasattr(self, attr):
+                delattr(self, attr)
         self.last_theta = 0.0
         self.last_f_collective = self.hover_thrust
         self.last_f_cmd = self.hover_thrust
@@ -934,20 +966,27 @@ class MPCC(Controller):
         self.last_rpy_cmd = np.zeros(3)
         self.last_rpy_act = np.zeros(3)
 
-    def get_debug_lines(self):
+    def get_debug_lines(self) -> list:
+        """Generate debug lines for visualization of the MPCC controller's trajectory and predictions."""
         debug_lines = []
         if hasattr(self, "arc_trajectory"):
             try:
                 full_path = self.arc_trajectory(self.arc_trajectory.x)
                 debug_lines.append((full_path, np.array([0.5, 0.5, 0.5, 0.7]), 2.0, 2.0))
-            except Exception: pass
+            except Exception:
+                pass
         if hasattr(self, "_x_warm"):
             pred_states = np.asarray([x_state[:3] for x_state in self._x_warm])
             debug_lines.append((pred_states, np.array([1.0, 0.1, 0.1, 0.95]), 3.0, 3.0))
-        if hasattr(self, "last_theta") and hasattr(self, "arc_trajectory") and hasattr(self, "_current_obs_pos"):
+        if (
+            hasattr(self, "last_theta")
+            and hasattr(self, "arc_trajectory")
+            and hasattr(self, "_current_obs_pos")
+        ):
             try:
                 target_on_path = self.arc_trajectory(self.last_theta)
                 segment = np.stack([self._current_obs_pos, target_on_path])
                 debug_lines.append((segment, np.array([0.0, 0.0, 1.0, 1.0]), 1.0, 1.0))
-            except Exception: pass
+            except Exception:
+                pass
         return debug_lines

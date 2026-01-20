@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Tuple
 import numpy as np
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from casadi import DM, MX, dot, floor, if_else, norm_2, substitute, vertcat
-from scipy.interpolate import CubicSpline
-from scipy.spatial.transform import Rotation as R
-
 from drone_models.core import load_params
 from drone_models.so_rpy_rotor import symbolic_dynamics_euler
 from drone_models.utils.rotation import ang_vel2rpy_rates
+from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation as R
+
 from lsy_drone_racing.control import Controller
 
 if TYPE_CHECKING:
@@ -19,13 +19,16 @@ if TYPE_CHECKING:
 
 
 class ObstacleType(IntEnum):
+    """Enumeration of obstacle types for drone racing path planning."""
     CYLINDER_2D = 0  # infinite cylinder: distance in XY plane only, for obstacles
     CAPSULE_3D = 2   # finite capsule segment: point-to-segment distance, for top and bottom bars of gates
 
 
 class FrameUtils:
+    """Utility class for frame and rotation operations related to drone racing gates."""
     @staticmethod
     def quat_to_axis(quat: NDArray[np.floating], axis_index: int = 1) -> NDArray[np.floating]:
+        """Converts a quaternion or array of quaternions to the specified axis vector(s)."""
         rot = R.from_quat(quat)
         mats = np.asarray(rot.as_matrix())
         if mats.ndim == 3:
@@ -36,6 +39,7 @@ class FrameUtils:
 
     @staticmethod
     def extract_gate_frames(gates_quaternions: NDArray[np.floating]) -> Tuple[NDArray, NDArray, NDArray]:
+        """Extracts the normal, Y-axis, and Z-axis vectors from an array of gate quaternions."""
         normals = FrameUtils.quat_to_axis(gates_quaternions, axis_index=0)
         y_axes = FrameUtils.quat_to_axis(gates_quaternions, axis_index=1)
         z_axes = FrameUtils.quat_to_axis(gates_quaternions, axis_index=2)
@@ -47,16 +51,28 @@ class FrameUtils:
 # ==============================================================================
 
 class RacingPathPlanner:
-    """
-    Handles trajectory generation, spline fitting, virtual obstacle creation,
-    and geometric avoidance logic.
-    """
+    """Handles trajectory generation, spline fitting, virtual obstacle creation, and geometric avoidance logic."""
     def __init__(self, ctrl_freq: float):
+        """Initialize the RacingPathPlanner with the given control frequency."""
         self.ctrl_freq = ctrl_freq
 
     # --- Spline Utilities ---
 
     def spline_through_points(self, duration: float, waypoints: NDArray[np.floating]) -> CubicSpline:
+        """Create a cubic spline through waypoints with arc-length-based parameterization.
+        
+        Parameters
+        ----------
+        duration : float
+            Total duration for the spline trajectory.
+        waypoints : NDArray[np.floating]
+            Array of waypoint positions to interpolate through.
+        
+        Returns
+        -------
+        CubicSpline
+            Cubic spline interpolating the waypoints with time parameterization.
+        """
         diffs = np.diff(waypoints, axis=0)
         segment_lengths = np.linalg.norm(diffs, axis=1)
         cum_len = np.concatenate([[0.0], np.cumsum(segment_lengths)])
@@ -66,6 +82,22 @@ class RacingPathPlanner:
     def reparametrize_by_arclength(
         self, trajectory: CubicSpline, arc_step: float = 0.05, epsilon: float = 1e-5
     ) -> CubicSpline:
+        """Reparametrize a cubic spline trajectory by arc length.
+        
+        Parameters
+        ----------
+        trajectory : CubicSpline
+            The input cubic spline to reparametrize.
+        arc_step : float, optional
+            Target arc length step size for reparametrization, by default 0.05.
+        epsilon : float, optional
+            Convergence tolerance for arc length uniformity, by default 1e-5.
+        
+        Returns:
+        -------
+        CubicSpline
+            Reparametrized cubic spline with approximately uniform arc length spacing.
+        """
         total_param_range = trajectory.x[-1] - trajectory.x[0]
         for _ in range(99):
             n_segments = max(2, int(total_param_range / arc_step))
@@ -81,6 +113,20 @@ class RacingPathPlanner:
         return CubicSpline(cum_arc, pts)
 
     def extend_spline_tail(self, trajectory: CubicSpline, extend_length: float = 1.0) -> CubicSpline:
+        """Extend the spline trajectory by continuing in the direction of the final velocity.
+        
+        Parameters
+        ----------
+        trajectory : CubicSpline
+            The input cubic spline to extend.
+        extend_length : float, optional
+            Length to extend the spline, by default 1.0.
+        
+        Returns:
+        -------
+        CubicSpline
+            Extended cubic spline with additional points along the velocity direction.
+        """
         base_knots = trajectory.x
         base_dt = min(base_knots[1] - base_knots[0], 0.2)
         p_end = trajectory(base_knots[-1])
@@ -107,6 +153,26 @@ class RacingPathPlanner:
         half_span: float = 0.5,
         samples_per_gate: int = 5,
     ) -> NDArray[np.floating]:
+        """Generate waypoints distributed across gate passages.
+        
+        Parameters
+        ----------
+        start_pos : NDArray[np.floating]
+            Starting position of the drone.
+        gates_positions : NDArray[np.floating]
+            Center positions of gates.
+        gates_normals : NDArray[np.floating]
+            Normal vectors of gates (pointing through the gate).
+        half_span : float, optional
+            Half-width of the gate sampling range, by default 0.5.
+        samples_per_gate : int, optional
+            Number of samples to distribute across each gate, by default 5.
+        
+        Returns:
+        -------
+        NDArray[np.floating]
+            Array of waypoints including start position and gate samples.
+        """
         n_gates = gates_positions.shape[0]
         grid = []
         for idx in range(samples_per_gate):
@@ -126,6 +192,32 @@ class RacingPathPlanner:
         angle_threshold: float = 120.0,
         detour_distance: float = 0.65,
     ) -> NDArray[np.floating]:
+        """Insert detour points at gates when trajectory angle exceeds threshold.
+        
+        Parameters
+        ----------
+        waypoints : NDArray[np.floating]
+            Array of waypoint positions to modify.
+        gate_positions : NDArray[np.floating]
+            Center positions of gates.
+        gate_normals : NDArray[np.floating]
+            Normal vectors of gates (pointing through the gate).
+        gate_y_axes : NDArray[np.floating]
+            Y-axis vectors of gate frames.
+        gate_z_axes : NDArray[np.floating]
+            Z-axis vectors of gate frames.
+        num_intermediate_points : int, optional
+            Number of intermediate points per gate, by default 5.
+        angle_threshold : float, optional
+            Angle threshold in degrees to trigger detour insertion, by default 120.0.
+        detour_distance : float, optional
+            Distance to place detour point from gate center, by default 0.65.
+        
+        Returns:
+        -------
+        NDArray[np.floating]
+            Modified waypoints array with inserted detour points.
+        """
         n_gates = gate_positions.shape[0]
         wp_list = list(waypoints)
         extra_inserted = 0
@@ -188,11 +280,7 @@ class RacingPathPlanner:
         gate_width: float,
         gate_height: float,
     ) -> Tuple[NDArray[np.floating], NDArray[np.int_], NDArray[np.floating], NDArray[np.floating]]:
-        """
-        Model gate frame as virtual obstacles:
-          - left/right posts: CYLINDER_2D
-          - top/bottom bars: CAPSULE_3D
-        """
+        """Model gate frame as virtual obstacles. Left/right posts: CYLINDER_2D. Top/bottom bars: CAPSULE_3D."""
         gate_y_axes = FrameUtils.quat_to_axis(gate_quats, axis_index=1)
         gate_z_axes = FrameUtils.quat_to_axis(gate_quats, axis_index=2)
 
@@ -241,20 +329,7 @@ class RacingPathPlanner:
         o_vec: NDArray[np.floating],
         o_len: float,
     ) -> Tuple[float, NDArray[np.floating]]:
-        """
-        Computes the distance to an obstacle and the vector required to push away from it.
-
-        Args:
-            pt: Current point on the trajectory (3,).
-            obst_c: Center position of the obstacle (3,).
-            o_type: Integer enum (0 for CYLINDER_2D, 2 for CAPSULE_3D).
-            o_vec: Direction vector for CAPSULE_3D (3,).
-            o_len: Half-length for CAPSULE_3D.
-
-        Returns:
-            dist: Euclidean distance to the nearest surface/center.
-            push_vec: Vector pointing from the obstacle center/axis towards the point.
-        """
+        """Computes the distance to an obstacle and the vector required to push away from it."""
         # Case: Infinite Cylinder (2D XY plane)
         if int(o_type) == int(ObstacleType.CYLINDER_2D):
             dist = float(np.linalg.norm(obst_c[:2] - pt[:2]))
@@ -289,20 +364,7 @@ class RacingPathPlanner:
         lens_list: NDArray[np.floating],
         planned_duration: float,
     ) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """
-        Refines the trajectory by detecting collisions and inserting detour points.
-        Args:
-            base_waypoints: Initial geometric waypoints.
-            obstacles_pos: Array of obstacle centers.
-            safe_dist_list: Array of safety radii/margins.
-            types_list: Array of ObstacleType enums.
-            vecs_list: Array of orientation vectors (for capsules).
-            lens_list: Array of lengths (for capsules).
-            planned_duration: Total time for the trajectory.
-
-        Returns:
-            Tuple of (time_points, waypoint_coordinates).
-        """
+        """Refines the trajectory by detecting collisions and inserting detour points."""
         pre_spline = self.spline_through_points(planned_duration, base_waypoints)
 
         # Ensure minimum sampling density
@@ -400,9 +462,7 @@ class RacingPathPlanner:
         gate_frame_margin: float,
         obstacle_margin: float
     ) -> Tuple[CubicSpline, float]:
-        """
-        Orchestrates: Gate WPs -> Gate Detours -> Virtual/Real Obstacles -> Spline
-        """
+        """Orchestrates: Gate WPs -> Gate Detours -> Virtual/Real Obstacles -> Spline."""
         gate_positions = obs["gates_pos"]
         obstacle_positions = obs["obstacles_pos"]
         gate_quats = obs["gates_quat"]
@@ -468,10 +528,7 @@ class RacingPathPlanner:
 # ==============================================================================
 
 class MPCC(Controller):
-    """
-    Model Predictive Contouring Control for drone racing (Level 3).
-    Includes real dynamics, actuator lag, and gate-frame-aware planning.
-    """
+    """Model Predictive Contouring Control for drone racing (Level 3).Includes real dynamics, actuator lag, and gate-frame-aware planning."""
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
         super().__init__(obs, info, config)
@@ -552,14 +609,7 @@ class MPCC(Controller):
     # Dynamics & Solver Setup (STRICTLY PRESERVED)
     # --------------------------------------------------------------------------
     def _export_dynamics_model(self) -> AcadosModel:
-        """
-        Defines the symbolic dynamics for the Acados OCP.
-        
-        Includes:
-        1. Nominal physical dynamics (drone physics).
-        2. Actuator dynamics (lag models).
-        3. Virtual path dynamics (progress variable theta).
-        """
+        """Defines the symbolic dynamics for the Acados OCP."""
         model_name = "lsy_mpcc_real_dyn_gateframe"
         params = self._dyn_params
 
@@ -680,7 +730,7 @@ class MPCC(Controller):
         model.p = params_sym
         return model
 
-    def _piecewise_linear_interp(self, theta, theta_vec, flattened_points, dim: int = 3):
+    def _piecewise_linear_interp(self, theta: MX, theta_vec: NDArray[np.floating], flattened_points: MX, dim: int = 3) -> MX:
         M = len(theta_vec)
         idx_float = (theta - theta_vec[0]) / (theta_vec[-1] - theta_vec[0]) * (M - 1)
         idx_low = floor(idx_float)
@@ -694,16 +744,8 @@ class MPCC(Controller):
         p_high = vertcat(*[flattened_points[dim * idx_high + i] for i in range(dim)])
         return (1.0 - alpha) * p_low + alpha * p_high
 
-    def _stage_cost_expression(self):
-        """
-        Constructs the CasADi expression for the MPC stage cost.
-        
-        Components:
-        1. Lag Error: Deviation along the path tangent (timing error).
-        2. Contour Error: Deviation perpendicular to the path (spatial error).
-        3. Input Regularization: Penalties on control rates (smoothness).
-        4. Progress Maximization: Reward for advancing theta (velocity).
-        """
+    def _stage_cost_expression(self) -> MX:
+        """Constructs the CasADi expression for the MPC stage cost."""
         # Current States
         position_vec = vertcat(self.px, self.py, self.pz)
         att_vec = vertcat(self.roll, self.pitch, self.yaw)
@@ -938,6 +980,7 @@ class MPCC(Controller):
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
+        """Compute control commands using Model Predictive Contouring Control."""
         self._current_obs_pos = obs["pos"]
 
         # Event Detection & Replanning
@@ -1039,10 +1082,12 @@ class MPCC(Controller):
     # Callbacks & Debug
     # --------------------------------------------------------------------------
 
-    def step_callback(self, *args, **kwargs) -> bool:
+    def step_callback(self, *args: any, **kwargs: any) -> bool:
+        """Check if the episode should be terminated."""
         return self.finished
 
     def episode_callback(self):
+        """Reset controller state for a new episode."""
         print("[MPCC] Episode reset.")
         self._step_count = 0
         self.finished = False
@@ -1055,7 +1100,8 @@ class MPCC(Controller):
         self.last_rpy_cmd = np.zeros(3)
         self.last_rpy_act = np.zeros(3)
 
-    def get_debug_lines(self):
+    def get_debug_lines(self) -> list:
+        """Generate debug visualization lines for the trajectory and predictions."""
         debug_lines = []
         if hasattr(self, "arc_trajectory"):
             try:
