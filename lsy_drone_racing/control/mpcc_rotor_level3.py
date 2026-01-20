@@ -68,7 +68,7 @@ class RacingPathPlanner:
         waypoints : NDArray[np.floating]
             Array of waypoint positions to interpolate through.
         
-        Returns
+        Returns:
         -------
         CubicSpline
             Cubic spline interpolating the waypoints with time parameterization.
@@ -531,6 +531,17 @@ class MPCC(Controller):
     """Model Predictive Contouring Control for drone racing (Level 3).Includes real dynamics, actuator lag, and gate-frame-aware planning."""
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
+        """Initialize MPCC controller with dynamics, MPC solver, and path planner.
+        
+        Parameters
+        ----------
+        obs : dict[str, NDArray[np.floating]]
+            Observation dictionary containing drone state (position, velocity, orientation, etc.).
+        info : dict
+            Additional information dictionary.
+        config : dict
+            Configuration dictionary with environment, simulation, and control parameters.
+        """
         super().__init__(obs, info, config)
 
         self._ctrl_freq = config.env.freq
@@ -946,14 +957,17 @@ class MPCC(Controller):
     # --------------------------------------------------------------------------
 
     def _pos_outside_limits(self, pos: NDArray[np.floating]) -> bool:
-        if self.pos_bound is None: return False
+        if self.pos_bound is None: 
+            return False
         for i_dim in range(3):
             low, high = self.pos_bound[i_dim]
-            if pos[i_dim] < low or pos[i_dim] > high: return True
+            if pos[i_dim] < low or pos[i_dim] > high: 
+                return True
         return False
 
     def _speed_outside_limits(self, vel: NDArray[np.floating]) -> bool:
-        if self.velocity_bound is None: return False
+        if self.velocity_bound is None: 
+            return False
         speed = np.linalg.norm(vel)
         return not (self.velocity_bound[0] < speed < self.velocity_bound[1])
 
@@ -1092,7 +1106,8 @@ class MPCC(Controller):
         self._step_count = 0
         self.finished = False
         for attr in ["_last_gate_flags", "_last_obst_flags", "_x_warm", "_u_warm", "_current_obs_pos"]:
-            if hasattr(self, attr): delattr(self, attr)
+            if hasattr(self, attr): 
+                delattr(self, attr)
         self.last_theta = 0.0
         self.last_f_collective = self.hover_thrust
         self.last_f_cmd = self.hover_thrust
@@ -1107,7 +1122,8 @@ class MPCC(Controller):
             try:
                 full_path = self.arc_trajectory(self.arc_trajectory.x)
                 debug_lines.append((full_path, np.array([0.5, 0.5, 0.5, 0.7]), 2.0, 2.0))
-            except Exception: pass
+            except Exception:
+                pass
         if hasattr(self, "_x_warm"):
             pred_states = np.asarray([x_state[:3] for x_state in self._x_warm])
             debug_lines.append((pred_states, np.array([1.0, 0.1, 0.1, 0.95]), 3.0, 3.0))
@@ -1116,5 +1132,6 @@ class MPCC(Controller):
                 target_on_path = self.arc_trajectory(self.last_theta)
                 segment = np.stack([self._current_obs_pos, target_on_path])
                 debug_lines.append((segment, np.array([0.0, 0.0, 1.0, 1.0]), 1.0, 1.0))
-            except Exception: pass
+            except Exception:
+                pass
         return debug_lines
